@@ -9,7 +9,7 @@
 -- Step3: Implement jump logic
 --      User can navigate to a mark by selecting it in the list (press Enter), or typing
 -- Step4: Implement persistent marks Saving logic
---     When user add/edit annotation, save the annotation to a file (default to `~/.config/nvim/marks_annotations.json`, but is configuerable)
+--     When user add/edit annotation, save the annotation to a file (default to `~/.config/nvim/persistent_marks.json`, but is configuerable)
 -- Step5: Implement persistent marks Matching logic
 --     When user open a file, load the marks annotations from the file, and use matchinmg algorithm to set the marks
 
