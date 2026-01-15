@@ -74,13 +74,17 @@ end
 
 function M.toggleMark(main_bufid, row, char)
     -- NOTE: If multiple chars associated, only delete the given char
-    -- TODO: duplicate global vim marks
     local extmarks = vim.api.nvim_buf_get_extmarks(main_bufid, namespace_id, {row - 1, 0}, {row - 1, -1}, {details = true})
     local existed = false
     for _, ext in ipairs(extmarks) do
         local mark_id, _, _, details = unpack(ext)
         local c = details.sign_text:sub(1, 1) or '?'
         if c == char then
+            local is_global = string.find(vim_global_chars, char, 1, true)
+            local global_row = vim.fn.getpos("'"..char)[1]
+            if is_global ~= nil and global_row > 0 then
+                vim.cmd('delmarks ' .. char)
+            end
             vim.api.nvim_buf_del_extmark(main_bufid, namespace_id, mark_id)
             vim.api.nvim_buf_del_mark(main_bufid, char)
             existed = true
@@ -122,9 +126,11 @@ function L.getMarks(bufid)
     -- Vim global marks A-Z
     for i=1, #vim_global_chars do
         local char = vim_global_chars:sub(i,i)
-        row, col = unpack(vim.api.nvim_buf_get_mark(bufid, char))
-        if row > 0 and marks[char] == nil then
-            -- print('Vim Mark found: ', char, row, filename)
+        local global_bufid, global_row, _, _ = unpack(vim.fn.getpos("'"..char))
+        row, col = unpack(vim.api.nvim_buf_get_mark(global_bufid, char))
+        if global_row > 0 and marks[char] == nil then
+            filename = vim.api.nvim_buf_get_name(global_bufid)
+            filename = vim.fn.fnamemodify(filename, ":.")
             local display = string.format("(%s) %s:%d", char, filename, row)
             marks[char] = {name=char, row=row, filename=filename, display=display}
         end
