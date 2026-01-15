@@ -33,10 +33,10 @@ function M.openMarks()
     local main_bufid = vim.api.nvim_get_current_buf()  --@type number
     local row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
     local content_lines = {
-        '" Help: Press `a-Z` Add mark | `E` Add annotation | `D` Delete annotation  | `+` List all | `q` Quit',
+        '" Help: Press `a-Z` Add mark | `e` Add annotation | `d` Delete  | `l` List all | `q` Quit',
     }
     -- Display existing marks
-    local marks = L.getMarks(main_bufid)
+    local marks = L.list_marks(main_bufid)
     if next(marks) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, 'Marks:')
@@ -45,7 +45,7 @@ function M.openMarks()
         table.insert(content_lines, item.display)
     end
     -- Display existing annotations
-    local notes = L.getAnnotations(main_bufid)
+    local notes = L.list_annotations(main_bufid)
     if next(notes) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, 'Annotations:')
@@ -59,20 +59,40 @@ function M.openMarks()
     vim.cmd('redraw')
     -- Manually listen for keypress
     local char = vim.fn.getcharstr()
-    if char == "E" then
+    if char == "e" then
         M.editAnnotation(main_bufid, row)
-    elseif char == 'D' then
-        M.delAnnotation(main_bufid, row)
-    elseif char == '+' then
+    elseif char == 'd' then
+        M.delMark(main_bufid, row)
+    elseif char == 'l' then
         M.listGlobalMarks()
     elseif char == 'q' or char == '\3' or char == '\27' then  -- q | <Ctrl-c> | <ESC>
         vim.cmd('bwipeout!')
     elseif string.find(vim_chars, char, 1, true) then
-        M.toggleMark(main_bufid, row, char)
+        M.addMark(main_bufid, row, char)
     end
 end
 
-function M.toggleMark(main_bufid, row, char)
+function M.addMark(main_bufid, row, char)
+    -- Remove global mark from another file
+    local old_bufid, old_row, _, _ = unpack(vim.fn.getpos("'"..char))
+    if char:match('%u') and old_bufid > 0 and old_row > 0 and old_bufid ~= main_bufid then
+        print('Deleting global mark before adding new', char)
+        L.delete_vimmark(old_bufid, old_row)
+        L.delete_extmark(old_bufid, old_row)
+    end
+    local mark_id = string.byte(char)
+    vim.api.nvim_buf_set_extmark(main_bufid, namespace_id, row - 1, 0, {
+        id=mark_id,
+        end_row=row-1,  -- TODO: allow multi-line mark/annotation
+        end_col=0,
+        sign_text=char,
+        sign_hl_group='Todo'
+    })
+    vim.api.nvim_buf_set_mark(main_bufid, char, row, 0, {})
+    vim.cmd('bwipeout!')
+end
+
+function M.toggleMark_old(main_bufid, row, char)
     -- NOTE: If multiple chars associated, only delete the given char
     local extmarks = vim.api.nvim_buf_get_extmarks(main_bufid, namespace_id, {row - 1, 0}, {row - 1, -1}, {details = true})
     local existed = false
@@ -80,11 +100,6 @@ function M.toggleMark(main_bufid, row, char)
         local mark_id, _, _, details = unpack(ext)
         local c = details.sign_text:sub(1, 1) or '?'
         if c == char then
-            local is_global = string.find(vim_global_chars, char, 1, true)
-            local global_row = vim.fn.getpos("'"..char)[1]
-            if is_global ~= nil and global_row > 0 then
-                vim.cmd('delmarks ' .. char)
-            end
             vim.api.nvim_buf_del_extmark(main_bufid, namespace_id, mark_id)
             vim.api.nvim_buf_del_mark(main_bufid, char)
             existed = true
@@ -108,7 +123,7 @@ end
 -- Collect both Nvim Extmarks & Vim Marks
 -- @param bufid number
 -- @return hash_table{} # {char=hash_table}
-function L.getMarks(bufid)
+function L.list_marks(bufid)
     local marks = {} -- @type hash_table{}
     local filename = vim.api.nvim_buf_get_name(bufid)
     filename = vim.fn.fnamemodify(filename, ":.")
@@ -138,7 +153,7 @@ function L.getMarks(bufid)
     return marks
 end
 
-function L.getAnnotations(bufid)
+function L.list_annotations(bufid)
     local notes = {} -- @type hash_table{}
     local filename = vim.api.nvim_buf_get_name(bufid)
     filename = vim.fn.fnamemodify(filename, ":.")
@@ -173,16 +188,23 @@ function M.editAnnotation(main_bufid, row)
     vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() L.saveAnnotation(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
 end
 
-function M.delAnnotation(main_bufid, row)
-    local extmarks = vim.api.nvim_buf_get_extmarks(0, ns, {row - 1, 0}, {row - 1, -1}, {details = true})
-    for _, ext in ipairs(extmarks) do
-        local mark_id, _, _, details = unpack(ext)
-        local c = details.sign_text:sub(1, 1) or '?'
-        if c == '*' then
-            vim.api.nvim_buf_del_extmark(main_bufid, namespace_id, mark_id)
-            print('Delete annotation', mark_id)
-            break
-        end
+function M.delMark(main_bufid, row)
+    L.delete_extmark(main_bufid, row)
+    L.delete_vimmark(main_bufid, row)
+    vim.cmd('bwipeout!')
+end
+
+function L.delete_extmark(main_bufid, row)
+    local extmarks = L.get_extmarks_by_row(main_bufid, row)
+    for _, mark_id in ipairs(extmarks) do
+        vim.api.nvim_buf_del_extmark(main_bufid, namespace_id, mark_id)
+    end
+end
+
+function L.delete_vimmark(main_bufid, row)
+    local char = L.get_mark_by_row(main_bufid, row)
+    if char ~= nil then
+        vim.api.nvim_buf_del_mark(main_bufid, char)
     end
 end
 
@@ -223,6 +245,37 @@ function L.createWindow()
     vim.cmd('nnoremap <buffer> <silent> <nowait> <C-c> :bwipeout!<CR>')
     vim.cmd('setlocal buftype=nofile bufhidden=wipe noswapfile nonumber norelativenumber nowrap nocursorline')
     return vim.api.nvim_get_current_buf()
+end
+
+-- @return array {mark_id, mark_id}
+function L.get_extmarks_by_row(bufid, target_row)
+    -- Parameters: (buffer, namespace, start_pos, end_pos, options)
+    local marks = {}
+    local extmarks = vim.api.nvim_buf_get_extmarks(bufid, namespace_id, {target_row-1, 0}, {target_row-1, -1}, {details = true})
+    for _, ext in ipairs(extmarks) do
+        table.insert(marks, ext[1])
+    end
+    return marks
+end
+
+-- @return number mark_id
+function L.get_mark_by_row(target_bufid, target_row)
+    -- Parameters: (buffer, namespace, start_pos, end_pos, options)
+    local marks = {}
+    for i=1, #vim_chars do
+        local char = vim_chars:sub(i,i)
+        local bufid, row
+        if char:match('%u') ~= nil then
+            bufid, row, _, _ = unpack(vim.fn.getpos("'"..char))
+        else
+            bufid = target_bufid
+            row, _ = unpack(vim.api.nvim_buf_get_mark(target_bufid, char))
+        end
+        if bufid == target_bufid and row == target_row and row ~= 0 then
+            return char
+        end
+    end
+    return nil
 end
 
 
