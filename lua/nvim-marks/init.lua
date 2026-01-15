@@ -3,6 +3,8 @@ local M = {}  -- Module to be required from outside
 local NamespaceID = vim.api.nvim_create_namespace('nvim-marks')
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 local ValidGlobalChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+local Marks = {}
+local Notes = {}
 
 
 --- @param bufid integer
@@ -141,10 +143,9 @@ end
 --- Each file has its own persistent-marks file, just like vim `undofile`
 --- TODO: accept customization of main folder instead of `.git/`
 ---
---- @param bufid integer # target buffer id
+--- @param source_path string # target buffer's file full path
 --- @return string # converted final json path for the persistent marks
-local function make_json_path(bufid)
-    local source_path = vim.api.nvim_buf_get_name(bufid)
+local function make_json_path(source_path)
     local flatten_name = vim.fn.fnamemodify(source_path, ':.'):gsub('/', '%%'):gsub('\\', '%%')
     local proj_root = vim.fs.root(source_path, '.git')
     if not proj_root then proj_root = '/tmp' end
@@ -169,7 +170,6 @@ local function save_json(data, json_path)
     else
         print('Failed to write data to', json_path)
     end
-    print('Saved data to file', json_path)
 end
 
 function M.openMarks()
@@ -180,18 +180,20 @@ function M.openMarks()
     }
     -- Display existing marks
     local marks = list_marks(main_bufid)
+    Marks = marks
     if next(marks) ~= nil then
         table.insert(content_lines, '')
-        table.insert(content_lines, 'Marks:')
+        table.insert(content_lines, '--- Marks ---')
     end
     for _, item in pairs(marks) do
         table.insert(content_lines, item.display)
     end
     -- Display existing notes
     local notes = list_notes(main_bufid)
+    Notes = notes
     if next(notes) ~= nil then
         table.insert(content_lines, '')
-        table.insert(content_lines, 'notes:')
+        table.insert(content_lines, '--- Notes ---')
     end
     for _, item in pairs(notes) do
         table.insert(content_lines, item.display)
@@ -261,8 +263,11 @@ end
 --- Collect marks/notes from current buffer and save to a local file
 --- Triggered by schedule, BufLeave|VimLeave or manually
 function M.SaveMarks(bufid)
-    local json_path = make_json_path(bufid)
-    local data = {path = '', marks = {}, notes = {}}
+    local source_path = vim.api.nvim_buf_get_name(bufid)
+    local json_path = make_json_path(source_path)
+    if Marks == {} then Marks = list_marks(bufid) end
+    if Notes == {} then Notes = list_notes(bufid) end
+    local data = {path = source_path, marks = Marks, notes = Notes}
     save_json(data, json_path)
 end
 
