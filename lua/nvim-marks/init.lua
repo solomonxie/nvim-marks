@@ -52,9 +52,10 @@ local function list_notes(bufid)
         if char == '*' then
             print('Note found: ', mark_id, row+1, filename)
             local name = tostring(mark_id)
+            local content = details.virt_lines
             local preview = details.virt_lines and details.virt_lines[1][1][1]:sub(1, 10) or ''
             local display = string.format("* %s:%d %s", filename, row+1, preview)
-            notes[name] = {name=name, row=row+1, filename=filename, display=display}
+            notes[name] = {name=name, row=row+1, filename=filename, display=display, content=content}
         end
     end
     return notes
@@ -66,6 +67,7 @@ local function createWindow()
     vim.cmd('botright 10 new')  -- Create new window and jump to the buffer context
     vim.b.is_marks_window = true
     vim.opt_local.buftype = 'nofile'
+    vim.opt_local.filetype = 'markdown'
     vim.cmd('mapclear <buffer>')
     vim.cmd('autocmd BufLeave,BufWinLeave,BufHidden <buffer> ++once  :bd!')
     vim.cmd('nnoremap <buffer> <silent> <nowait> q :bwipeout!<CR>')
@@ -151,15 +153,24 @@ local function save_json(data, json_path)
     end
 end
 
+--- @param json_path string
+local function load_json(json_path)
+    local f = io.open(json_path, 'r')
+    if not f then return nil end
+    local content = f:read("*all")
+    f:close()
+    return vim.json.decode(content)
+end
+
 function M.openMarks()
     local main_bufid = vim.api.nvim_get_current_buf()  --- @type integer
     local row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
     local content_lines = {
-        '" Help: Press `a-Z` Add mark | `+` Add note | `-` Delete  | `*` List all | `q` Quit',
+        '# Help: Press `a-Z` Add mark | `+` Add note | `-` Delete  | `*` List all | `q` Quit',
     }
     -- Display existing marks
     local marks = list_marks(main_bufid)
-    Marks = marks
+    Marks = vim.deepcopy(marks)
     if next(marks) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Marks ---')
@@ -169,7 +180,7 @@ function M.openMarks()
     end
     -- Display existing notes
     local notes = list_notes(main_bufid)
-    Notes = notes
+    Notes = vim.deepcopy(notes)
     if next(notes) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Notes ---')
@@ -178,7 +189,7 @@ function M.openMarks()
         table.insert(content_lines, item.display)
     end
     -- Save to file
-    M.SaveMarks(main_bufid)
+    M.saveMarks(main_bufid)
     -- Render window content
     local bufid = createWindow()
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, content_lines)
@@ -208,13 +219,15 @@ function M.addMark(main_bufid, row, char)
         delete_extmark(old_bufid, old_row)
     end
     local mark_id = string.byte(char)
+    -- Add nvim extmark
     vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
         id=mark_id,
         end_row=row-1,  -- TODO: allow multi-line mark/note
         end_col=0,
         sign_text=char,
-        sign_hl_group='Todo'
+        sign_hl_group='Todo',
     })
+    -- Add vim native mark
     vim.api.nvim_buf_set_mark(main_bufid, char, row, 0, {})
     vim.cmd('bwipeout!')
 end
@@ -227,7 +240,6 @@ end
 
 function M.editNote(main_bufid, row)
     local bufid = createWindow()
-    vim.cmd('set filetype=markdown')
     vim.api.nvim_set_option_value('filetype', 'markdown', { buf = bufid })
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, {
         '# Help: Press `S` edit; `q` Quit; `Ctrl-s` save and quit',
@@ -265,21 +277,60 @@ end
 
 --- Collect marks/notes from current buffer and save to a local file
 --- Triggered by schedule, BufLeave|VimLeave or manually
-function M.SaveMarks(bufid)
+---
+--- @param bufid integer # target buffer id
+function M.saveMarks(bufid)
     local source_path = vim.api.nvim_buf_get_name(bufid)
     local json_path = make_json_path(source_path)
-    if Marks == {} then Marks = list_marks(bufid) end
-    if Notes == {} then Notes = list_notes(bufid) end
+    if Marks == {} then Marks = vim.deepcopy(list_marks(bufid)) end
+    if Notes == {} then Notes = vim.deepcopy(list_notes(bufid)) end
     if Marks == {} and Notes == {} then
         return
     end
     local data = {path = source_path, marks = Marks, notes = Notes}
     save_json(data, json_path)
-    print('Saved persistent marks to', json_path)
+    print('Saved persistent marks to', json_path, vim.inspect(data))
 end
 
 --- Restore marks/notes from the local file to current buffer
-function M.LoadMarks()
+--- Triggered by schedule, BufEnter or manually
+---
+--- @param bufid integer # target buffer id
+function M.loadMarks(bufid)
+    local source_path = vim.api.nvim_buf_get_name(bufid)
+    local json_path = make_json_path(source_path)
+    if vim.fn.filereadable(json_path) == 0 then
+        return
+    end
+    print('Loading marks from', json_path)
+    local data = load_json(json_path)
+    if data == nil or data.notes == nil then
+        return
+    end
+    -- Load marks
+    for char, details in pairs(data.marks) do
+        print('Recovering one mark', char, vim.inspect(details))
+        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
+            id=char,
+            end_row=details.row,
+            end_col=0,
+            sign_text=char,
+            sign_hl_group='Todo',
+        })  -- Neovim
+        vim.api.nvim_buf_set_mark(bufid, char, details.row, 0, {})  -- Vim
+    end
+    -- Load notes
+    for mark_id, details in pairs(data.notes) do
+        print('Recovering one mark', char, vim.inspect(details))
+        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row, 0, {
+            id=char,
+            end_row=details.row,
+            end_col=0,
+            sign_text=char,
+            sign_hl_group='Todo',
+            virt_lines=details.content,
+        })
+    end
 end
 
 
