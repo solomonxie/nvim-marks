@@ -33,7 +33,7 @@ function M.openMarks()
     local main_bufid = vim.api.nvim_get_current_buf()  --@type number
     local row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
     local content_lines = {
-        '" Help: Press `-` Delete mark| `+` List all  | `e` Add annotation | `q` Quit',
+        '" Help: Press `a-Z` Add mark | `E` Add annotation | `D` Delete annotation  | `+` List all | `q` Quit',
     }
     -- Display existing marks
     local marks = L.getMarks(main_bufid)
@@ -59,41 +59,45 @@ function M.openMarks()
     vim.cmd('redraw')
     -- Manually listen for keypress
     local char = vim.fn.getcharstr()
-    if char == '-' then
-        M.DelMark(main_bufid, row, char)
-    elseif char == "e" then
-        -- vim.cmd('setlocal modifiable')
+    if char == "E" then
         M.editAnnotation(main_bufid, row)
+    elseif char == 'D' then
+        M.delAnnotation(main_bufid, row)
     elseif char == '+' then
         M.listGlobalMarks()
     elseif char == 'q' or char == '\3' or char == '\27' then  -- q | <Ctrl-c> | <ESC>
         vim.cmd('bwipeout!')
     elseif string.find(vim_chars, char, 1, true) then
-        M.addMark(main_bufid, row, char)
+        M.toggleMark(main_bufid, row, char)
     end
 end
 
-
-function M.addMark(main_bufid, row, char)
-    local mark_id = math.random(10000, 99999)  -- ID is scoped under whole project
-    -- Must auto-align Vim marks & Nvim Extmarks to have wider supports (shortcuts, plugins...)
-    print('Adding a mark', char, ':', mark_id, ' at line ', row, ' in buffer ', main_bufid)
-    -- TODO: replace existing mark if already exists
-    vim.api.nvim_buf_set_mark(main_bufid, char, row, 0, {})  -- Vim native mark
-    vim.api.nvim_buf_set_extmark(main_bufid, namespace_id, row - 1, 0, {
-        id=mark_id,  -- id=byte value of char (avoids duplicates for same char)
-        end_row=row-1,  -- TODO: allow multi-line mark/annotation
-        end_col=0,
-        sign_text=char,
-        sign_hl_group='Todo'
-    })
-    print("ExtMark added: " .. char); vim.cmd('redraw')
-    vim.cmd('bwipeout!')
-end
-
-function M.DelMark(main_bufid, row, char)
-    -- TODO: Find existing mark at current row
-    vim.api.nvim_buf_del_extmark(main_bufid, namespace_id, string.byte(char))
+function M.toggleMark(main_bufid, row, char)
+    -- NOTE: If multiple chars associated, only delete the given char
+    -- TODO: duplicate global vim marks
+    local extmarks = vim.api.nvim_buf_get_extmarks(main_bufid, namespace_id, {row - 1, 0}, {row - 1, -1}, {details = true})
+    local existed = false
+    for _, ext in ipairs(extmarks) do
+        local mark_id, _, _, details = unpack(ext)
+        local c = details.sign_text:sub(1, 1) or '?'
+        if c == char then
+            vim.api.nvim_buf_del_extmark(main_bufid, namespace_id, mark_id)
+            vim.api.nvim_buf_del_mark(main_bufid, char)
+            existed = true
+            break
+        end
+    end
+    if not existed then
+        local mark_id = string.byte(char)
+        vim.api.nvim_buf_set_extmark(main_bufid, namespace_id, row - 1, 0, {
+            id=mark_id,  -- id=byte value of char (avoids duplicates for same char)
+            end_row=row-1,  -- TODO: allow multi-line mark/annotation
+            end_col=0,
+            sign_text=char,
+            sign_hl_group='Todo'
+        })
+        vim.api.nvim_buf_set_mark(main_bufid, char, row, 0, {})
+    end
     vim.cmd('bwipeout!')
 end
 
@@ -125,10 +129,8 @@ function L.getMarks(bufid)
             marks[char] = {name=char, row=row, filename=filename, display=display}
         end
     end
-    print('Collected', #marks, 'marks: ', vim.inspect(marks))
     return marks
 end
-
 
 function L.getAnnotations(bufid)
     local notes = {} -- @type hash_table{}
@@ -145,7 +147,6 @@ function L.getAnnotations(bufid)
             notes[char] = {name=name, row=row+1, filename=filename, display=display}
         end
     end
-    print('Collected ', #notes, 'notes: ', vim.inspect(notes))
     return notes
 end
 
@@ -160,10 +161,23 @@ function M.editAnnotation(main_bufid, row)
     vim.cmd('set filetype=markdown')
     vim.api.nvim_set_option_value('filetype', 'markdown', { buf = bufid })
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, {
-        'Hit `i` to edit your annotation here. (Press `<Ctrl-s>` to save and exit)',
+        '# Help: Press `C` edit; `q` Quit; `Ctrl-s` save and quit',
     })
     -- vim.cmd('startinsert')
     vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() L.saveAnnotation(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
+end
+
+function M.delAnnotation(main_bufid, row)
+    local extmarks = vim.api.nvim_buf_get_extmarks(0, ns, {row - 1, 0}, {row - 1, -1}, {details = true})
+    for _, ext in ipairs(extmarks) do
+        local mark_id, _, _, details = unpack(ext)
+        local c = details.sign_text:sub(1, 1) or '?'
+        if c == '*' then
+            vim.api.nvim_buf_del_extmark(main_bufid, namespace_id, mark_id)
+            print('Delete annotation', mark_id)
+            break
+        end
+    end
 end
 
 function L.saveAnnotation(main_bufid, bufid, row)
@@ -176,7 +190,7 @@ function L.saveAnnotation(main_bufid, bufid, row)
         table.insert(virt_lines, {{line, "Comment"}})
     end
     -- TODO: Save annotation to Extmarks
-    local mark_id = math.random(10000, 99999)  -- ID is scoped under whole project
+    local mark_id = math.random(1000, 9999)
     vim.api.nvim_buf_set_extmark(main_bufid, namespace_id, row - 1, 0, {
         id=mark_id,  -- @type number
         end_row=row-1,  -- TODO: allow multi-line mark/annotation
