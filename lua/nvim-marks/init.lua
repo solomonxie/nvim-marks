@@ -33,7 +33,7 @@ function M.openMarks()
     local main_bufid = vim.api.nvim_get_current_buf()  --@type number
     local row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
     local content_lines = {
-        '" Help: Press `a-Z` Add mark | `e` Add annotation | `d` Delete  | `l` List all | `q` Quit',
+        '" Help: Press `a-Z` Add mark | `+` Add annotation | `-` Delete  | `*` List all | `q` Quit',
     }
     -- Display existing marks
     local marks = L.list_marks(main_bufid)
@@ -59,11 +59,11 @@ function M.openMarks()
     vim.cmd('redraw')
     -- Manually listen for keypress
     local char = vim.fn.getcharstr()
-    if char == "e" then
+    if char == "+" then
         M.editAnnotation(main_bufid, row)
-    elseif char == 'd' then
+    elseif char == '-' then
         M.delMark(main_bufid, row)
-    elseif char == 'l' then
+    elseif char == '*' then
         M.listGlobalMarks()
     elseif char == 'q' or char == '\3' or char == '\27' then  -- q | <Ctrl-c> | <ESC>
         vim.cmd('bwipeout!')
@@ -76,7 +76,6 @@ function M.addMark(main_bufid, row, char)
     -- Remove global mark from another file
     local old_bufid, old_row, _, _ = unpack(vim.fn.getpos("'"..char))
     if char:match('%u') and old_bufid > 0 and old_row > 0 and old_bufid ~= main_bufid then
-        print('Deleting global mark before adding new', char)
         L.delete_vimmark(old_bufid, old_row)
         L.delete_extmark(old_bufid, old_row)
     end
@@ -182,7 +181,7 @@ function M.editAnnotation(main_bufid, row)
     vim.cmd('set filetype=markdown')
     vim.api.nvim_set_option_value('filetype', 'markdown', { buf = bufid })
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, {
-        '# Help: Press `C` edit; `q` Quit; `Ctrl-s` save and quit',
+        '# Help: Press `S` edit; `q` Quit; `Ctrl-s` save and quit',
     })
     -- vim.cmd('startinsert')
     vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() L.saveAnnotation(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
