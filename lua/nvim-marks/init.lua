@@ -3,8 +3,6 @@ local M = {}  -- Module to be required from outside
 local NamespaceID = vim.api.nvim_create_namespace('nvim-marks')
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 local ValidGlobalChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-local VimMarks = {}   --- @type table<string, table> # {char=details} Vim native marks
-local ExtMarks = {}  --- @type table<integer, table> # {mark_id=details} Neovim Extmarks
 
 
 --- @param bufid integer
@@ -51,9 +49,10 @@ local function list_notes(bufid)
         local char = details.sign_text:sub(1, 1) or '?'
         if char == '*' then
             print('Note found: ', mark_id, row+1, filename)
-            local name = details.virt_lines and details.virt_lines[1][1][1]:sub(1, 10) or ''
-            local display = string.format("* %s:%d %s", filename, row+1, name)
-            notes[char] = {name=name, row=row+1, filename=filename, display=display}
+            local name = tostring(mark_id)
+            local preview = details.virt_lines and details.virt_lines[1][1][1]:sub(1, 10) or ''
+            local display = string.format("* %s:%d %s", filename, row+1, preview)
+            notes[name] = {name=name, row=row+1, filename=filename, display=display}
         end
     end
     return notes
@@ -103,7 +102,6 @@ local function get_mark_by_row(target_bufid, target_row)
     return ''
 end
 
---- @return nil
 local function delete_extmark(main_bufid, row)
     local extmarks = get_extmarks_by_row(main_bufid, row)
     for _, mark_id in ipairs(extmarks) do
@@ -111,7 +109,6 @@ local function delete_extmark(main_bufid, row)
     end
 end
 
---- @return nil
 local function delete_vimmark(main_bufid, row)
     local char = get_mark_by_row(main_bufid, row)
     if char ~= '' then
@@ -120,8 +117,6 @@ local function delete_vimmark(main_bufid, row)
 end
 
 --- For simplicity, we don't mix note with marks, they're managed differently
----
---- @return nil
 local function createNote(main_bufid, bufid, row)
     print('Saving note at line ', row, ' in buffer ', bufid)
     local text_lines = vim.api.nvim_buf_get_lines(bufid, 0, -1, false)
@@ -140,6 +135,41 @@ local function createNote(main_bufid, bufid, row)
     })
     vim.cmd('stopinsert')
     vim.cmd('bwipeout!')
+end
+
+--- Marks go with project, better to be saved under project folder
+--- Each file has its own persistent-marks file, just like vim `undofile`
+--- TODO: accept customization of main folder instead of `.git/`
+---
+--- @param bufid integer # target buffer id
+--- @return string # converted final json path for the persistent marks
+local function make_json_path(bufid)
+    local source_path = vim.api.nvim_buf_get_name(bufid)
+    local flatten_name = vim.fn.fnamemodify(source_path, ':.'):gsub('/', '%%'):gsub('\\', '%%')
+    local proj_root = vim.fs.root(source_path, '.git')
+    if not proj_root then proj_root = '/tmp' end
+    local proj_name = vim.fn.fnamemodify(proj_root, ':t')
+    local json_path = proj_root .. '/.git/persistent_marks/' .. proj_name .. '/' .. flatten_name:gsub('/', '%%') .. '.json'
+    print('Will save data to', json_path)
+    return json_path
+end
+
+--- @param data table
+local function save_json(data, json_path)
+    local json_data = vim.fn.json_encode(data)
+    -- Create folder if not exist
+    local target_dir = vim.fn.fnamemodify(json_path, ':p:h')
+    if vim.fn.isdirectory(target_dir) == 0 then
+        vim.fn.mkdir(target_dir, 'p')
+    end
+    local f = io.open(json_path, 'w')
+    if f then
+        f:write(json_data)
+        f:close()
+    else
+        print('Failed to write data to', json_path)
+    end
+    print('Saved data to file', json_path)
 end
 
 function M.openMarks()
@@ -230,11 +260,10 @@ end
 
 --- Collect marks/notes from current buffer and save to a local file
 --- Triggered by schedule, BufLeave|VimLeave or manually
-function M.SaveMarks()
-    local all_items = {}
-    -- Iterate #VimMarks, normalize and insert into all_items
-    -- Iterate #ExtMarks, normalize and insert into all_items
-    -- Save all_items to a local json file, 1:1 source file and mark file, like how vim undofile saves
+function M.SaveMarks(bufid)
+    local json_path = make_json_path(bufid)
+    local data = {path = '', marks = {}, notes = {}}
+    save_json(data, json_path)
 end
 
 --- Restore marks/notes from the local file to current buffer
