@@ -118,27 +118,6 @@ local function delete_vimmark(main_bufid, row)
     end
 end
 
---- For simplicity, we don't mix note with marks, they're managed differently
-local function createNote(main_bufid, bufid, row)
-    print('Saving note at line ', row, ' in buffer ', bufid)
-    local text_lines = vim.api.nvim_buf_get_lines(bufid, 0, -1, false)
-    local virt_lines = {}
-    for _, line in ipairs(text_lines) do
-        table.insert(virt_lines, {{line, "Comment"}})
-    end
-    local mark_id = math.random(1000, 9999)
-    vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
-        id=mark_id,  --- @type number
-        end_row=row-1,  -- TODO: allow multi-line mark/note
-        end_col=0,
-        sign_text='*',
-        sign_hl_group='Todo',
-        virt_lines=virt_lines,
-    })
-    vim.cmd('stopinsert')
-    vim.cmd('bwipeout!')
-end
-
 --- Marks go with project, better to be saved under project folder
 --- Each file has its own persistent-marks file, just like vim `undofile`
 --- TODO: accept customization of main folder instead of `.git/`
@@ -146,11 +125,11 @@ end
 --- @param source_path string # target buffer's file full path
 --- @return string # converted final json path for the persistent marks
 local function make_json_path(source_path)
-    local flatten_name = vim.fn.fnamemodify(source_path, ':.'):gsub('/', '%%'):gsub('\\', '%%')
+    local flatten_name = vim.fn.fnamemodify(source_path, ':.'):gsub('/', '__'):gsub('\\', '__')
     local proj_root = vim.fs.root(source_path, '.git')
     if not proj_root then proj_root = '/tmp' end
     local proj_name = vim.fn.fnamemodify(proj_root, ':t')
-    local json_path = proj_root .. '/.git/persistent_marks/' .. proj_name .. '/' .. flatten_name:gsub('/', '%%') .. '.json'
+    local json_path = proj_root .. '/.git/persistent_marks/' .. proj_name .. '/' .. flatten_name .. '.json'
     print('Will save data to', json_path)
     return json_path
 end
@@ -198,6 +177,9 @@ function M.openMarks()
     for _, item in pairs(notes) do
         table.insert(content_lines, item.display)
     end
+    -- Save to file
+    M.SaveMarks(main_bufid)
+    -- Render window content
     local bufid = createWindow()
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, content_lines)
     vim.cmd('setlocal readonly nomodifiable')
@@ -251,12 +233,33 @@ function M.editNote(main_bufid, row)
         '# Help: Press `S` edit; `q` Quit; `Ctrl-s` save and quit',
     })
     -- vim.cmd('startinsert')
-    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() createNote(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
+    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() M.createNote(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
 end
 
 function M.delMark(main_bufid, row)
     delete_extmark(main_bufid, row)
     delete_vimmark(main_bufid, row)
+    vim.cmd('bwipeout!')
+end
+
+--- For simplicity, we don't mix note with marks, they're managed differently
+function M.createNote(main_bufid, bufid, row)
+    print('Saving note at line ', row, ' in buffer ', bufid)
+    local text_lines = vim.api.nvim_buf_get_lines(bufid, 0, -1, false)
+    local virt_lines = {}
+    for _, line in ipairs(text_lines) do
+        table.insert(virt_lines, {{line, "Comment"}})
+    end
+    local mark_id = math.random(1000, 9999)
+    vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
+        id=mark_id,  --- @type number
+        end_row=row-1,  -- TODO: allow multi-line mark/note
+        end_col=0,
+        sign_text='*',
+        sign_hl_group='Todo',
+        virt_lines=virt_lines,
+    })
+    vim.cmd('stopinsert')
     vim.cmd('bwipeout!')
 end
 
@@ -267,8 +270,12 @@ function M.SaveMarks(bufid)
     local json_path = make_json_path(source_path)
     if Marks == {} then Marks = list_marks(bufid) end
     if Notes == {} then Notes = list_notes(bufid) end
+    if Marks == {} and Notes == {} then
+        return
+    end
     local data = {path = source_path, marks = Marks, notes = Notes}
     save_json(data, json_path)
+    print('Saved persistent marks to', json_path)
 end
 
 --- Restore marks/notes from the local file to current buffer
