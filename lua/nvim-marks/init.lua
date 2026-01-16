@@ -3,7 +3,7 @@ local M = {}  -- Module to be required from outside
 local NamespaceID = vim.api.nvim_create_namespace('nvim-marks')
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 local ValidGlobalChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-local BVars = {}  --- @type table <integer, table> # {bufid=table_of_variables} Buffer scoped variables
+local BCache = {}  --- @type table <integer, table> # {bufid=table_of_variables} Buffer scoped variables
 
 
 --- @param bufid integer
@@ -140,12 +140,13 @@ local function save_json(data, json_path)
 end
 
 --- @param json_path string
+--- @return table|nil
 local function load_json(json_path)
     local f = io.open(json_path, 'r')
     if not f then return nil end
     local content = f:read("*all")
     f:close()
-    return vim.json.decode(content)
+    return vim.json.decode(content) or {}
 end
 
 function M.openMarks()
@@ -218,7 +219,7 @@ function M.addMark(main_bufid, row, char)
     -- Save
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(main_bufid), ":.")
     local display = string.format("(%s) %s:%d", char, filename, row)
-    BVars[main_bufid].Marks[char] = {name=char, row=row, filename=filename, display=display}
+    BCache[main_bufid].Marks[char] = {name=char, row=row, filename=filename, display=display}
     M.saveMarks(main_bufid)
     -- vim.cmd('bwipeout!')
 end
@@ -268,7 +269,7 @@ function M.addNote(main_bufid, bufid, row)
     local content = table.concat(text_lines, '  ')
     local preview = content:sub(1, 10)
     local display = string.format("* %s:%d %s", filename, row, preview)
-    BVars[main_bufid].Notes[name] = {name=name, row=row, filename=filename, display=display, lines=virt_lines}
+    BCache[main_bufid].Notes[name] = {name=name, row=row, filename=filename, display=display, lines=virt_lines}
     M.saveMarks(main_bufid)
     vim.cmd('stopinsert')
     vim.cmd('bwipeout!')
@@ -279,13 +280,14 @@ end
 ---
 --- @param bufid integer # target buffer id
 function M.saveMarks(bufid)
-    marks = vim.deepcopy(BVars[bufid].Marks)
-    notes = vim.deepcopy(BVars[bufid].Notes)
     local source_path = vim.api.nvim_buf_get_name(bufid)
     local json_path = make_json_path(source_path)
-    local data = {path = source_path, marks = marks, notes = notes}
+    if next(BCache[bufid].Marks) == nil and next(BCache[bufid].Notes) == nil then
+        local result = vim.fn.delete(json_path)
+        return
+    end
+    local data = {path = source_path, marks = BCache[bufid].Marks, notes = BCache[bufid].Notes}
     save_json(data, json_path)
-    -- print('Saved marks', bufid, json_path)
 end
 
 --- Restore marks/notes from the local file to current buffer
@@ -293,7 +295,6 @@ end
 function M.loadMarks()
     local main_bufid = vim.api.nvim_get_current_buf()
     if not is_real_file(main_bufid) then
-        -- print('buffer isnt real', main_bufid)
         return
     end
     local source_path = vim.api.nvim_buf_get_name(main_bufid)
@@ -301,10 +302,11 @@ function M.loadMarks()
     if vim.fn.filereadable(json_path) == 0 then
         return
     end
-    local data = load_json(json_path)
-    if data == nil or data.notes == nil then
-        return
-    end
+    local data = load_json(json_path) or {marks={}, notes={}}
+    if BCache[main_bufid] == nil then BCache[main_bufid] = {} end
+    -- Update buffer cache
+    BCache[main_bufid].Marks = data.marks or {}
+    BCache[main_bufid].Notes = data.notes or {}
     -- Load marks
     for char, details in pairs(data.marks) do
         vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row - 1, 0, {
@@ -318,13 +320,14 @@ function M.loadMarks()
     end
     -- Load notes
     for name, details in pairs(data.notes) do
+        local mark_id = tonumber(name)
         vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row - 1, 0, {
-            id=tonumber(name),
+            id=mark_id,
             end_row=details.row - 1,
             end_col=0,
-            sign_text=char,
+            sign_text='*',
             sign_hl_group='Todo',
-            lines=details.content,
+            virt_lines=details.lines,
         })
     end
 end
@@ -332,24 +335,24 @@ end
 function M.bufferSetup(opt)
     -- Setup buffer variables
     local main_bufid = vim.api.nvim_get_current_buf()
-    if BVars[main_bufid] == nil then
-        BVars[main_bufid] = {Marks={}, Notes={}}
+    if BCache[main_bufid] == nil then
+        BCache[main_bufid] = {Marks={}, Notes={}}
     end
-    if BVars[main_bufid] and BVars[main_bufid].is_setup_done == true then
+    if BCache[main_bufid] and BCache[main_bufid].is_setup_done == true then
         return
     end
-    if BVars[main_bufid].Marks == nil then
-        BVars[main_bufid].Marks = {}
+    if BCache[main_bufid].Marks == nil then
+        BCache[main_bufid].Marks = {}
     end
-    if BVars[main_bufid].Notes == nil then
-        BVars[main_bufid].Notes = {}
+    if BCache[main_bufid].Notes == nil then
+        BCache[main_bufid].Notes = {}
     end
     M.loadMarks()
     vim.api.nvim_create_autocmd({ 'BufLeave', 'BufWinLeave', 'BufHidden' }, {
         buffer = main_bufid,
         callback = function() M.saveMarks(main_bufid) end,
     })
-    BVars[main_bufid].is_setup_done = true
+    BCache[main_bufid].is_setup_done = true
 end
 
 function M.setup(opt)
