@@ -9,7 +9,7 @@ local BVars = {}  --- @type table <integer, table> # {bufid=table_of_variables} 
 --- @param bufid integer
 --- @return table<string, table> # {char=details}
 local function list_marks(bufid)
-    local marks = {}  --- @type table<string, table}
+    local marks = {}  --- @type table<string, table>
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufid), ":.")
     -- Nvim Extmarks
     local extmarks = vim.api.nvim_buf_get_extmarks(bufid, NamespaceID, 0, -1, {details=true})
@@ -17,7 +17,6 @@ local function list_marks(bufid)
         local mark_id, row, col, details = unpack(ext)
         local char = details.sign_text:gsub('%s+', '') or '?'
         if string.find(ValidMarkChars, char, 1, true) ~= nil then
-            -- print('ExtMark found: ', name, row+1, col+1, filename)
             local display = string.format("(%s) %s:%d", char, filename, row+1, col+1)
             marks[char] = {name=char, row=row+1, filename=filename, display=display}
         end
@@ -47,7 +46,6 @@ local function list_notes(bufid)
         local mark_id, row, col, details = unpack(ext)
         local char = details.sign_text:sub(1, 1) or '?'
         if char == '*' then
-            print('Note found: ', mark_id, row+1, filename)
             local name = tostring(mark_id)
             local content = details.virt_lines
             local preview = details.virt_lines and details.virt_lines[1][1][1]:sub(1, 10) or ''
@@ -74,46 +72,23 @@ local function createWindow()
     return vim.api.nvim_get_current_buf()
 end
 
---- @return integer[] # {mark_id, mark_id}
-local function get_extmarks_by_row(target_bufid, target_row)
-    local marks = {}
-    local extmarks = vim.api.nvim_buf_get_extmarks(target_bufid, NamespaceID, {target_row-1, 0}, {target_row-1, -1}, {details = true})
+local function delete_extmark(target_bufid, target_row)
+    local extmarks = vim.api.nvim_buf_get_extmarks(target_bufid, NamespaceID, {target_row-1, 0}, {target_row-1, -1}, {})
     for _, ext in ipairs(extmarks) do
-        table.insert(marks, ext[1])
+        local mark_id, row, _, _ = unpack(ext)
+        if row == target_row - 1 then
+            vim.api.nvim_buf_del_extmark(target_bufid, NamespaceID, mark_id)
+        end
     end
-    return marks
 end
 
---- @return string # mark_id
-local function get_mark_by_row(target_bufid, target_row)
-    local marks = {}
+local function delete_vimmark(target_bufid, target_row)
     for i=1, #ValidMarkChars do
         local char = ValidMarkChars:sub(i,i)
-        local bufid, row
-        if char:match('%u') ~= nil then
-            bufid, row, _, _ = unpack(vim.fn.getpos("'"..char))
-        else
-            bufid = target_bufid
-            row, _ = unpack(vim.api.nvim_buf_get_mark(target_bufid, char))
+        local bufid, row, _, _ = unpack(vim.fn.getpos("'"..char))
+        if bufid == target_bufid and row == target_row then
+            vim.api.nvim_buf_del_mark(bufid, char)
         end
-        if bufid == target_bufid and row == target_row and row ~= 0 then
-            return char
-        end
-    end
-    return ''
-end
-
-local function delete_extmark(main_bufid, row)
-    local extmarks = get_extmarks_by_row(main_bufid, row)
-    for _, mark_id in ipairs(extmarks) do
-        vim.api.nvim_buf_del_extmark(main_bufid, NamespaceID, mark_id)
-    end
-end
-
-local function delete_vimmark(main_bufid, row)
-    local char = get_mark_by_row(main_bufid, row)
-    if char ~= '' then
-        vim.api.nvim_buf_del_mark(main_bufid, char)
     end
 end
 
@@ -208,17 +183,21 @@ function M.openMarks()
         M.editNote(main_bufid, row)
     elseif char == '-' then
         M.delMark(main_bufid, row)
+        vim.cmd('bwipeout!')
     elseif char == '*' then
         M.listGlobalMarks()
     elseif char == 'q' or char == '\3' or char == '\27' then  -- q | <Ctrl-c> | <ESC>
         vim.cmd('bwipeout!')
     elseif string.find(ValidMarkChars, char, 1, true) then
         M.addMark(main_bufid, row, char)
+        vim.cmd('bwipeout!')
     end
 end
 
 --- Add both Vim Mark & Neovim Extmark at current line
 function M.addMark(main_bufid, row, char)
+    -- Remove all existing marks at this row
+    M.delMark(main_bufid, row)
     -- Remove global mark from another file
     local old_bufid, old_row, _, _ = unpack(vim.fn.getpos("'"..char))
     if char:match('%u') and old_bufid > 0 and old_row > 0 and old_bufid ~= main_bufid then
@@ -238,10 +217,10 @@ function M.addMark(main_bufid, row, char)
     vim.api.nvim_buf_set_mark(main_bufid, char, row, 0, {})
     -- Save
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(main_bufid), ":.")
-    local display = string.format("(%s) %s:%d", char, filename, row+1)
-    BVars[main_bufid].Marks[char] = {name=char, row=row+1, filename=filename, display=display}
+    local display = string.format("(%s) %s:%d", char, filename, row)
+    BVars[main_bufid].Marks[char] = {name=char, row=row, filename=filename, display=display}
     M.saveMarks(main_bufid)
-    vim.cmd('bwipeout!')
+    -- vim.cmd('bwipeout!')
 end
 
 function M.listGlobalMarks()
@@ -262,14 +241,14 @@ function M.editNote(main_bufid, row)
 end
 
 function M.delMark(main_bufid, row)
+    -- Remove all existing marks at this row
     delete_extmark(main_bufid, row)
     delete_vimmark(main_bufid, row)
-    vim.cmd('bwipeout!')
+    -- vim.cmd('bwipeout!')
 end
 
 --- For simplicity, we don't mix note with marks, they're managed differently
 function M.addNote(main_bufid, bufid, row)
-    print('Saving note at line ', row, ' in buffer ', bufid)
     local text_lines = vim.api.nvim_buf_get_lines(bufid, 0, -1, false)
     local virt_lines = {}
     for _, line in ipairs(text_lines) do
@@ -286,10 +265,10 @@ function M.addNote(main_bufid, bufid, row)
     })
     -- Save
     local name = tostring(mark_id)
-    local content = details.virt_lines
-    local preview = details.virt_lines and details.virt_lines[1][1][1]:sub(1, 10) or ''
-    local display = string.format("* %s:%d %s", filename, row+1, preview)
-    BVars[main_bufid].Notes[char] = {name=name, row=row+1, filename=filename, display=display, content=content}
+    local content = table.concat(text_lines, '  ')
+    local preview = content:sub(1, 10)
+    local display = string.format("* %s:%d %s", filename, row, preview)
+    BVars[main_bufid].Notes[name] = {name=name, row=row, filename=filename, display=display, lines=virt_lines}
     M.saveMarks(main_bufid)
     vim.cmd('stopinsert')
     vim.cmd('bwipeout!')
@@ -302,21 +281,19 @@ end
 function M.saveMarks(bufid)
     marks = vim.deepcopy(BVars[bufid].Marks)
     notes = vim.deepcopy(BVars[bufid].Notes)
-    if marks == {} and notes == {} then
-        return
-    end
     local source_path = vim.api.nvim_buf_get_name(bufid)
     local json_path = make_json_path(source_path)
     local data = {path = source_path, marks = marks, notes = notes}
     save_json(data, json_path)
+    -- print('Saved marks', bufid, json_path)
 end
 
 --- Restore marks/notes from the local file to current buffer
---- Triggered by schedule, BufEnter or manually
+--- Trigger once at buffer's 1st load
 function M.loadMarks()
     local main_bufid = vim.api.nvim_get_current_buf()
     if not is_real_file(main_bufid) then
-        print('buffer isnt real', main_bufid)
+        -- print('buffer isnt real', main_bufid)
         return
     end
     local source_path = vim.api.nvim_buf_get_name(main_bufid)
@@ -330,9 +307,9 @@ function M.loadMarks()
     end
     -- Load marks
     for char, details in pairs(data.marks) do
-        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row, 0, {
+        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row - 1, 0, {
             id=string.byte(char),
-            end_row=details.row,
+            end_row=details.row - 1,
             end_col=0,
             sign_text=char,
             sign_hl_group='Todo',
@@ -341,14 +318,13 @@ function M.loadMarks()
     end
     -- Load notes
     for name, details in pairs(data.notes) do
-        print('Recovering one mark', char, vim.inspect(details))
-        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row, 0, {
+        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row - 1, 0, {
             id=tonumber(name),
-            end_row=details.row,
+            end_row=details.row - 1,
             end_col=0,
             sign_text=char,
             sign_hl_group='Todo',
-            virt_lines=details.content,
+            lines=details.content,
         })
     end
 end
@@ -359,6 +335,9 @@ function M.bufferSetup(opt)
     if BVars[main_bufid] == nil then
         BVars[main_bufid] = {Marks={}, Notes={}}
     end
+    if BVars[main_bufid] and BVars[main_bufid].is_setup_done == true then
+        return
+    end
     if BVars[main_bufid].Marks == nil then
         BVars[main_bufid].Marks = {}
     end
@@ -366,11 +345,14 @@ function M.bufferSetup(opt)
         BVars[main_bufid].Notes = {}
     end
     M.loadMarks()
-    print('buffer setup done')
+    vim.api.nvim_create_autocmd({ 'BufLeave', 'BufWinLeave', 'BufHidden' }, {
+        buffer = main_bufid,
+        callback = function() M.saveMarks(main_bufid) end,
+    })
+    BVars[main_bufid].is_setup_done = true
 end
 
 function M.setup(opt)
-    print('Setup called with options:', vim.inspect(opt))
     -- TODO: handle options (file location, keymaps, etc)
     -- ...
 end
