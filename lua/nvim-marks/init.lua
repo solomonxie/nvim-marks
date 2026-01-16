@@ -73,11 +73,18 @@ local function createWindow()
 end
 
 local function delete_extmark(target_bufid, target_row)
-    local extmarks = vim.api.nvim_buf_get_extmarks(target_bufid, NamespaceID, {target_row-1, 0}, {target_row-1, -1}, {})
+    local extmarks = vim.api.nvim_buf_get_extmarks(target_bufid, NamespaceID, {target_row-1, 0}, {target_row-1, -1}, {details=true})
     for _, ext in ipairs(extmarks) do
-        local mark_id, row, _, _ = unpack(ext)
+        local mark_id, row, _, details = unpack(ext)
+        local char = details.sign_text:sub(1, 1)
         if row == target_row - 1 then
             vim.api.nvim_buf_del_extmark(target_bufid, NamespaceID, mark_id)
+            -- Delete cache
+            if string.find(ValidMarkChars, char) ~= nil then
+                BCache[target_bufid].Marks[char] = nil
+            else
+                BCache[target_bufid].Notes[tostring(mark_id)] = nil
+            end
         end
     end
 end
@@ -88,6 +95,13 @@ local function delete_vimmark(target_bufid, target_row)
         local bufid, row, _, _ = unpack(vim.fn.getpos("'"..char))
         if bufid == target_bufid and row == target_row then
             vim.api.nvim_buf_del_mark(bufid, char)
+            BCache[target_bufid].Marks[char] = nil
+        elseif bufid ~= target_bufid and bufid ~= 0 then
+            -- Also remove mark(global) in another buffer
+            vim.api.nvim_buf_del_mark(bufid, char)
+            BCache[old_bufid].Marks[char] = nil  -- fixme: marks is nil when another buffer isn't opened
+            delete_extmark(old_bufid, old_row)
+            M.saveMarks(old_bufid)
         end
     end
 end
@@ -199,12 +213,6 @@ end
 function M.addMark(main_bufid, row, char)
     -- Remove all existing marks at this row
     M.delMark(main_bufid, row)
-    -- Remove global mark from another file
-    local old_bufid, old_row, _, _ = unpack(vim.fn.getpos("'"..char))
-    if char:match('%u') and old_bufid > 0 and old_row > 0 and old_bufid ~= main_bufid then
-        delete_vimmark(old_bufid, old_row)
-        delete_extmark(old_bufid, old_row)
-    end
     local mark_id = string.byte(char)
     -- Add nvim extmark
     vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
@@ -230,8 +238,10 @@ function M.listGlobalMarks()
     -- Source 2: all Vim global marks with registry `A-Z`
 end
 
+--- Enter into a light editor mode
+--- TOOD: if note already exists at this row, edit instead of create
+--- TODO: allow :w to save instead of <ctrl-s>
 function M.editNote(main_bufid, row)
-    -- TOOD: if note already exists at this row, edit instead of create
     local bufid = createWindow()
     vim.api.nvim_set_option_value('filetype', 'markdown', { buf = bufid })
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, {
@@ -241,11 +251,11 @@ function M.editNote(main_bufid, row)
     vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() M.addNote(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
 end
 
+--- Remove all existing marks at this row
 function M.delMark(main_bufid, row)
-    -- Remove all existing marks at this row
     delete_extmark(main_bufid, row)
     delete_vimmark(main_bufid, row)
-    -- vim.cmd('bwipeout!')
+    M.saveMarks(main_bufid)
 end
 
 --- For simplicity, we don't mix note with marks, they're managed differently
