@@ -3,16 +3,14 @@ local M = {}  -- Module to be required from outside
 local NamespaceID = vim.api.nvim_create_namespace('nvim-marks')
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 local ValidGlobalChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-local Marks = {}
-local Notes = {}
+local BVars = {}  --- @type table <integer, table> # {bufid=table_of_variables} Buffer scoped variables
 
 
 --- @param bufid integer
 --- @return table<string, table> # {char=details}
 local function list_marks(bufid)
-    local marks = {}
-    local filename = vim.api.nvim_buf_get_name(bufid)
-    filename = vim.fn.fnamemodify(filename, ":.")
+    local marks = {}  --- @type table<string, table}
+    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufid), ":.")
     -- Nvim Extmarks
     local extmarks = vim.api.nvim_buf_get_extmarks(bufid, NamespaceID, 0, -1, {details=true})
     for _, ext in ipairs(extmarks) do
@@ -43,8 +41,7 @@ end
 --- @return table<string, table> # {char=details}
 local function list_notes(bufid)
     local notes = {} -- @type hash_table{}
-    local filename = vim.api.nvim_buf_get_name(bufid)
-    filename = vim.fn.fnamemodify(filename, ":.")
+    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufid), ":.")
     local extmarks = vim.api.nvim_buf_get_extmarks(bufid, NamespaceID, 0, -1, {details=true})
     for _, ext in ipairs(extmarks) do
         local mark_id, row, col, details = unpack(ext)
@@ -120,6 +117,21 @@ local function delete_vimmark(main_bufid, row)
     end
 end
 
+local function is_real_file(bufid)
+    if type(bufid) ~= 'number' or not vim.api.nvim_buf_is_valid(bufid) then
+        return false
+    end
+    local buftype = vim.api.nvim_get_option_value("buftype", { buf = bufid })
+    if buftype ~= '' then
+        return false
+    end
+    local path = vim.api.nvim_buf_get_name(bufid)
+    if path == '' then
+        return false
+    end
+    return vim.fn.filereadable(path) == 1
+end
+
 --- Marks go with project, better to be saved under project folder
 --- Each file has its own persistent-marks file, just like vim `undofile`
 --- TODO: accept customization of main folder instead of `.git/`
@@ -132,7 +144,6 @@ local function make_json_path(source_path)
     if not proj_root then proj_root = '/tmp' end
     local proj_name = vim.fn.fnamemodify(proj_root, ':t')
     local json_path = proj_root .. '/.git/persistent_marks/' .. proj_name .. '/' .. flatten_name .. '.json'
-    print('Will save data to', json_path)
     return json_path
 end
 
@@ -170,7 +181,6 @@ function M.openMarks()
     }
     -- Display existing marks
     local marks = list_marks(main_bufid)
-    Marks = vim.deepcopy(marks)
     if next(marks) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Marks ---')
@@ -180,7 +190,6 @@ function M.openMarks()
     end
     -- Display existing notes
     local notes = list_notes(main_bufid)
-    Notes = vim.deepcopy(notes)
     if next(notes) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Notes ---')
@@ -188,8 +197,6 @@ function M.openMarks()
     for _, item in pairs(notes) do
         table.insert(content_lines, item.display)
     end
-    -- Save to file
-    M.saveMarks(main_bufid)
     -- Render window content
     local bufid = createWindow()
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, content_lines)
@@ -229,6 +236,11 @@ function M.addMark(main_bufid, row, char)
     })
     -- Add vim native mark
     vim.api.nvim_buf_set_mark(main_bufid, char, row, 0, {})
+    -- Save
+    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(main_bufid), ":.")
+    local display = string.format("(%s) %s:%d", char, filename, row+1)
+    BVars[main_bufid].Marks[char] = {name=char, row=row+1, filename=filename, display=display}
+    M.saveMarks(main_bufid)
     vim.cmd('bwipeout!')
 end
 
@@ -239,13 +251,14 @@ function M.listGlobalMarks()
 end
 
 function M.editNote(main_bufid, row)
+    -- TOOD: if note already exists at this row, edit instead of create
     local bufid = createWindow()
     vim.api.nvim_set_option_value('filetype', 'markdown', { buf = bufid })
     vim.api.nvim_buf_set_lines(bufid, 0, -1, false, {
         '# Help: Press `S` edit; `q` Quit; `Ctrl-s` save and quit',
     })
     -- vim.cmd('startinsert')
-    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() M.createNote(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
+    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() M.addNote(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
 end
 
 function M.delMark(main_bufid, row)
@@ -255,7 +268,7 @@ function M.delMark(main_bufid, row)
 end
 
 --- For simplicity, we don't mix note with marks, they're managed differently
-function M.createNote(main_bufid, bufid, row)
+function M.addNote(main_bufid, bufid, row)
     print('Saving note at line ', row, ' in buffer ', bufid)
     local text_lines = vim.api.nvim_buf_get_lines(bufid, 0, -1, false)
     local virt_lines = {}
@@ -271,6 +284,13 @@ function M.createNote(main_bufid, bufid, row)
         sign_hl_group='Todo',
         virt_lines=virt_lines,
     })
+    -- Save
+    local name = tostring(mark_id)
+    local content = details.virt_lines
+    local preview = details.virt_lines and details.virt_lines[1][1][1]:sub(1, 10) or ''
+    local display = string.format("* %s:%d %s", filename, row+1, preview)
+    BVars[main_bufid].Notes[char] = {name=name, row=row+1, filename=filename, display=display, content=content}
+    M.saveMarks(main_bufid)
     vim.cmd('stopinsert')
     vim.cmd('bwipeout!')
 end
@@ -280,50 +300,50 @@ end
 ---
 --- @param bufid integer # target buffer id
 function M.saveMarks(bufid)
-    local source_path = vim.api.nvim_buf_get_name(bufid)
-    local json_path = make_json_path(source_path)
-    if Marks == {} then Marks = vim.deepcopy(list_marks(bufid)) end
-    if Notes == {} then Notes = vim.deepcopy(list_notes(bufid)) end
-    if Marks == {} and Notes == {} then
+    marks = vim.deepcopy(BVars[bufid].Marks)
+    notes = vim.deepcopy(BVars[bufid].Notes)
+    if marks == {} and notes == {} then
         return
     end
-    local data = {path = source_path, marks = Marks, notes = Notes}
+    local source_path = vim.api.nvim_buf_get_name(bufid)
+    local json_path = make_json_path(source_path)
+    local data = {path = source_path, marks = marks, notes = notes}
     save_json(data, json_path)
-    print('Saved persistent marks to', json_path, vim.inspect(data))
 end
 
 --- Restore marks/notes from the local file to current buffer
 --- Triggered by schedule, BufEnter or manually
----
---- @param bufid integer # target buffer id
-function M.loadMarks(bufid)
-    local source_path = vim.api.nvim_buf_get_name(bufid)
+function M.loadMarks()
+    local main_bufid = vim.api.nvim_get_current_buf()
+    if not is_real_file(main_bufid) then
+        print('buffer isnt real', main_bufid)
+        return
+    end
+    local source_path = vim.api.nvim_buf_get_name(main_bufid)
     local json_path = make_json_path(source_path)
     if vim.fn.filereadable(json_path) == 0 then
         return
     end
-    print('Loading marks from', json_path)
     local data = load_json(json_path)
     if data == nil or data.notes == nil then
         return
     end
     -- Load marks
     for char, details in pairs(data.marks) do
-        print('Recovering one mark', char, vim.inspect(details))
-        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
-            id=char,
+        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row, 0, {
+            id=string.byte(char),
             end_row=details.row,
             end_col=0,
             sign_text=char,
             sign_hl_group='Todo',
         })  -- Neovim
-        vim.api.nvim_buf_set_mark(bufid, char, details.row, 0, {})  -- Vim
+        vim.api.nvim_buf_set_mark(main_bufid, char, details.row, 0, {})  -- Vim
     end
     -- Load notes
-    for mark_id, details in pairs(data.notes) do
+    for name, details in pairs(data.notes) do
         print('Recovering one mark', char, vim.inspect(details))
         vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row, 0, {
-            id=char,
+            id=tonumber(name),
             end_row=details.row,
             end_col=0,
             sign_text=char,
@@ -333,6 +353,21 @@ function M.loadMarks(bufid)
     end
 end
 
+function M.bufferSetup(opt)
+    -- Setup buffer variables
+    local main_bufid = vim.api.nvim_get_current_buf()
+    if BVars[main_bufid] == nil then
+        BVars[main_bufid] = {Marks={}, Notes={}}
+    end
+    if BVars[main_bufid].Marks == nil then
+        BVars[main_bufid].Marks = {}
+    end
+    if BVars[main_bufid].Notes == nil then
+        BVars[main_bufid].Notes = {}
+    end
+    M.loadMarks()
+    print('buffer setup done')
+end
 
 function M.setup(opt)
     print('Setup called with options:', vim.inspect(opt))
