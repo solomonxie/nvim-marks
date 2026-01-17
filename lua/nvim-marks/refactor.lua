@@ -114,11 +114,19 @@ local function save_all(bufnr)
     -- Save vimmarks
     local vimmarks = scan_vimmarks()
     local vim_path = make_json_path('vimmarks_global')
-    save_json(vimmarks, vim_path)
+    if #vimmarks > 0 then
+        save_json(vimmarks, vim_path)
+    else
+        os.remove(vim_path) -- Delete empty files if no marks at all
+    end
     -- Save extmarks
-    local extmarks = scan_extmarks()
+    local extmarks = scan_extmarks(bufnr)
     local ext_path = make_json_path(BufCache[bufnr].filename)
-    save_json(extmarks, ext_path)
+    if #extmarks > 0 then
+        save_json(extmarks, ext_path)
+    else
+        os.remove(ext_path) -- Delete empty files if no marks at all
+    end
 end
 
 --- Scan multiple vimmarks on a given row
@@ -282,7 +290,6 @@ function M.openMarks()
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Marks ---')
     end
-    print('found #vimmarks', #vimmarks)
     for _, item in ipairs(vimmarks) do
         local char, row, filename = unpack(item)
         local display = string.format("(%s) %s:%d", char, filename, row)
@@ -290,14 +297,13 @@ function M.openMarks()
     end
     -- Render notes
     local extmarks = scan_extmarks(target_bufnr)
-    print('found #extmarks', #extmarks)
     if next(extmarks) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Notes ---')
     end
     for _, ext in ipairs(extmarks) do
         local _, row, filename, details = unpack(ext)  -- details.virt_lines eg: {{{"line1", "Comment"}, {"line2", "Comment"}}}
-        print(vim.inspect(details))
+        -- print(vim.inspect(details))
         local preview = details.virt_lines[1][1][1]:sub(1, 24)
         local display = string.format("* %s:%d %s", BufCache[target_bufnr].filename, row, preview)
         table.insert(content_lines, display)
@@ -331,7 +337,14 @@ function M.setupBuffer()
         BufCache[bufnr] = {setup_done=true, filename=filename, is_file=is_file}
         restore_vimmarks(bufnr)
         restore_extmarks(bufnr)
-        print('Buffer setup done for bufnr:', bufnr)
+        -- Register auto-saving
+        vim.api.nvim_create_autocmd({'BufLeave', 'BufWinLeave', 'BufHidden'}, {
+            buffer = bufnr,
+            callback = function()
+                save_all(bufnr)
+            end,
+        })
+        print('Buffer setup done for file:', filename)
     end
 end
 
