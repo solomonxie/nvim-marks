@@ -120,14 +120,33 @@ local function save_all(bufnr)
     save_json(extmarks, ext_path)
 end
 
+--- Scan multiple vimmarks on a given row
+---
+--- @return string[] #  Signs of Vimmarks
+local function get_mark_chars_by_row(target_bufnr, target_row)
+    local markchars = {}
+    for i=1, #ValidMarkChars do
+        local char = ValidMarkChars:sub(i,i)
+        local bufnr, row, _, _ = unpack(vim.fn.getpos("'"..char))
+        if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Get real bufnr (0 means current)
+        if bufnr == target_bufnr and row == target_row then
+            table.insert(markchars, char)
+        end
+    end
+    return markchars
+end
+
 --- Create a vimmark
 function set_vimmark(bufnr, char, row)
     vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
 end
 
 --- Create a vimmark
-local function delete_vimmark(bufnr, char, row)
-    vim.api.nvim_buf_del_mark(bufnr, char)
+local function delete_vimmark(bufnr, row)
+    local markchars = get_mark_chars_by_row(bufnr, row)
+    for _, char in ipairs(markchars) do
+        vim.api.nvim_buf_del_mark(bufnr, char)
+    end
 end
 
 --- Restore Vimmarks for all files, only run once.
@@ -256,19 +275,23 @@ function M.openMarks()
         '> Help: Press `a-Z` Add mark | `+` Add note | `-` Delete  | `*` List all | `q` Quit',
     }
     -- Render marks
-    local marks = scan_vimmarks()
-    if next(marks) ~= nil then
+    local vimmarks = scan_vimmarks()
+    if next(vimmarks) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Marks ---')
     end
-    for _, item in pairs(marks) do
+    for _, item in ipairs(vimmarks) do
         local char, row, filename = unpack(item)
         local display = string.format("(%s) %s:%d", char, filename, row)
         table.insert(content_lines, display)
     end
     -- Render notes
-    local notes = scan_extmarks(target_bufnr)
-    for _, item in pairs(extmarks) do
+    local extmarks = scan_extmarks(target_bufnr)
+    if next(extmarks) ~= nil then
+        table.insert(content_lines, '')
+        table.insert(content_lines, '--- Notes ---')
+    end
+    for _, item in ipairs(extmarks) do
         local _, row, filename, details = unpack(item)
         local content = table.concat(text_lines, '  ')
         local preview = details.virt_lines[0][0]:sub(1, 24)
@@ -277,20 +300,20 @@ function M.openMarks()
     end
     -- Create a window and display
     local win_bufnr = create_window()
-    vim.api.nvim_buf_set_lines(bufid, 0, -1, false, content_lines)
+    vim.api.nvim_buf_set_lines(win_bufnr, 0, -1, false, content_lines)
     vim.cmd('setlocal readonly nomodifiable')
     vim.cmd('redraw')
     -- Listen for user's next keystroke
-    local char = vim.fn.getcharstr()
+    local key = vim.fn.getcharstr()
     vim.cmd('bwipeout!')  -- Close window no matter what
-    if char == '-' then
-        delete_vimmark(main_bufid, char, row)
-    elseif char == "+" then
+    if key == '-' then
+        delete_vimmark(target_bufnr, target_row)
+    elseif key == "+" then
         M.switchEditMode(target_bufnr, target_row)
-    elseif char == 'q' or char == '\3' or char == '\27' then  -- q | <Ctrl-c> | <ESC>
+    elseif key == 'q' or key == '\3' or key == '\27' then  -- q | <Ctrl-c> | <ESC>
         -- Do nothing.
-    elseif char:match('%a') then  -- Any other a-zA-Z letter
-        set_vimmark(target_bufnr, target_row, char)
+    elseif key:match('%a') then  -- Any other a-zA-Z letter
+        set_vimmark(target_bufnr, key, target_row)
     end
 end
 
@@ -301,9 +324,9 @@ function M.setupBuffer()
     if not is_file then return end
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
     if BufCache[bufnr] == nil then
+        BufCache[bufnr] = {setup_done=true, filename=filename, is_file=is_file}
         restore_vimmarks(bufnr)
         restore_extmarks(bufnr)
-        BufCache[bufnr] = {setup_done=true, filename=filename, is_file=is_file}
         print('Buffer setup done for bufnr:', bufnr)
     end
 end
