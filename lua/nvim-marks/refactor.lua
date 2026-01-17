@@ -89,8 +89,9 @@ local function scan_vimmarks()
     for i=1, #ValidMarkChars do
         local char = ValidMarkChars:sub(i,i)
         local bufnr, row, col, _ = unpack(vim.fn.getpos("'"..char))
-        if bufnr ~=0 and row ~= 0 then
-            table.insert(vimmarks, {char, row, filename})
+        if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Get real bufnr (0 means current)
+        if row ~= 0 then
+            table.insert(vimmarks, {char, row, BufCache[bufnr].filename})
         end
     end
     return vimmarks
@@ -253,9 +254,10 @@ function M.createNote(edit_bufnr, target_bufnr, target_row)
         end_row=target_row-1,  -- extmark is 0-indexed
         end_col=0,
         sign_text='*',
-        sign_hl_group='Comment',
+        sign_hl_group='TODO',
         virt_lines=virt_lines,
     })
+    vim.cmd('bwipeout!')
 end
 
 --- Swith to note editing mode allows user to type notes
@@ -280,6 +282,7 @@ function M.openMarks()
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Marks ---')
     end
+    print('found #vimmarks', #vimmarks)
     for _, item in ipairs(vimmarks) do
         local char, row, filename = unpack(item)
         local display = string.format("(%s) %s:%d", char, filename, row)
@@ -287,15 +290,16 @@ function M.openMarks()
     end
     -- Render notes
     local extmarks = scan_extmarks(target_bufnr)
+    print('found #extmarks', #extmarks)
     if next(extmarks) ~= nil then
         table.insert(content_lines, '')
         table.insert(content_lines, '--- Notes ---')
     end
-    for _, item in ipairs(extmarks) do
-        local _, row, filename, details = unpack(item)
-        local content = table.concat(text_lines, '  ')
-        local preview = details.virt_lines[0][0]:sub(1, 24)
-        local display = string.format("* %s:%d %s", filename, row, preview)
+    for _, ext in ipairs(extmarks) do
+        local _, row, filename, details = unpack(ext)  -- details.virt_lines eg: {{{"line1", "Comment"}, {"line2", "Comment"}}}
+        print(vim.inspect(details))
+        local preview = details.virt_lines[1][1][1]:sub(1, 24)
+        local display = string.format("* %s:%d %s", BufCache[target_bufnr].filename, row, preview)
         table.insert(content_lines, display)
     end
     -- Create a window and display
