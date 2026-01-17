@@ -113,7 +113,7 @@ end
 local function save_all(bufnr)
     -- Save vimmarks
     local vimmarks = scan_vimmarks()
-    local vim_path = make_json_path('vimmarks_global')
+    local vim_path = make_json_path('vimmarks_global')  -- todo: issue: each file has its own local marks
     if #vimmarks > 0 then
         save_json(vimmarks, vim_path)
     else
@@ -165,8 +165,8 @@ end
 local function restore_vimmarks(bufnr)
     local json_path = make_json_path('vimmarks_global')
     local vimmarks = load_json(json_path) or {}  --- @type table[] # [{char=a, filename=abc, row=1}, {...}]
-    for _, item in ipairs(vimmarks) do
-        local char, row, filename = unpack(item)
+    for _, mark in ipairs(vimmarks) do
+        local char, row, filename = unpack(mark)
         -- For Vim global marks at other files, we need to open the file to restore mark,
         -- but that will trigger some BufEnter actions, which user may not like,
         -- so we allow user to customize this behavior
@@ -217,32 +217,19 @@ end
 
 
 --- Scan latest vimmarks and update left sign bar
-function M.updateSignColumn(bufnr)
+local function update_sign_column(bufnr)
     local vimmarks = scan_vimmarks()  --  mark={char, filename, row}
-    print('updating signs...')
-    -- TODO: create/move/delete signs at the bar
-    -- local placed_signs = vim.fn.sign_getplaced(bufnr, {group = "*"})
-    -- vim.fn.sign_define("MyLetterA", { text = "A", texthl = "Search" })
-    -- vim.fn.sign_place(0, "my_group", "MyLetterA", "%", { lnum = 2 })
-    -- -- TODO: review AI code
-    -- local sign_group = "my_mark_group"
-    -- -- 1. Clear existing signs in this group to handle moved/deleted marks
-    -- vim.fn.sign_unplace(sign_group, { buffer = bufnr })
-    -- for _, mark in ipairs(vimmarks) do
-    --     -- Only process marks for the current file
-    --     if mark.filename == vim.api.nvim_buf_get_name(bufnr) then
-    --         local sign_name = "MarkSign_" .. mark.char
-    --         -- 2. Define sign on the fly (Vim handles duplicates gracefully)
-    --         vim.fn.sign_define(sign_name, {
-    --             text = mark.char,
-    --             texthl = "WarningMsg" -- or your preferred highlight
-    --         })
-    --         -- 3. Place the sign
-    --         -- We use the ASCII value of the char as the ID to keep it unique
-    --         local sign_id = string.byte(mark.char)
-    --         vim.fn.sign_place(sign_id, sign_group, sign_name, bufnr, { lnum = mark.row })
-    --     end
-    -- end
+    local sign_group = 'nvim-marks'
+    vim.fn.sign_unplace(sign_group, {buffer = bufnr})  -- Delete all signs then add each
+    for _, mark in ipairs(vimmarks) do
+        local char, row, filename = unpack(mark)
+        local sign_id = string.byte(char)
+        local sign_name = "nvim_mark_" .. char
+        if filename == BufCache[bufnr].filename then
+            vim.fn.sign_define(sign_name, {text = char, texthl = "WarningMsg"})
+            vim.fn.sign_place(sign_id, sign_group, sign_name, bufnr, {lnum = row})
+        end
+    end
 end
 
 --- Read from user edits, save it to an extmark attached to the target
@@ -250,7 +237,7 @@ end
 --- @param edit_bufnr integer # editor-buffer's id
 --- @param target_bufnr integer # target-buffer's id
 --- @param target_row integer # target-buffer's row number
-function M.createNote(edit_bufnr, target_bufnr, target_row)
+local function save_note(edit_bufnr, target_bufnr, target_row)
     local virt_lines = {}
     local read_lines = vim.api.nvim_buf_get_lines(edit_bufnr, 0, -1, false)
     for _, line in ipairs(read_lines) do
@@ -266,6 +253,7 @@ function M.createNote(edit_bufnr, target_bufnr, target_row)
         virt_lines=virt_lines,
     })
     vim.cmd('bwipeout!')
+    update_sign_column(target_bufnr)
 end
 
 --- Swith to note editing mode allows user to type notes
@@ -274,7 +262,7 @@ function M.switchEditMode(target_bufnr, target_row)
     vim.api.nvim_buf_set_lines(edit_bufnr, 0, -1, false, {
         '> Help: Press `S` edit; `q` Quit; `Ctrl-s` save and quit',
     })
-    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() M.createNote(edit_bufnr, target_bufnr, target_row) end, {buffer=true, silent=true, nowait=true })
+    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() save_note(edit_bufnr, target_bufnr, target_row) end, {buffer=true, silent=true, nowait=true })
 end
 
 function M.openMarks()
@@ -304,7 +292,7 @@ function M.openMarks()
     for _, ext in ipairs(extmarks) do
         local _, row, filename, details = unpack(ext)  -- details.virt_lines eg: {{{"line1", "Comment"}, {"line2", "Comment"}}}
         -- print(vim.inspect(details))
-        local preview = details.virt_lines[1][1][1]:sub(1, 24)
+        local preview = '' --details.virt_lines or details.virt_lines[1] or details.virt_lines[1][1][1]:sub(1, 24)
         local display = string.format("* %s:%d %s", BufCache[target_bufnr].filename, row, preview)
         table.insert(content_lines, display)
     end
@@ -325,6 +313,7 @@ function M.openMarks()
     elseif key:match('%a') then  -- Any other a-zA-Z letter
         set_vimmark(target_bufnr, key, target_row)
     end
+    update_sign_column(target_bufnr)
 end
 
 --- On buffer init(once), restore marks from persistent file
@@ -337,12 +326,15 @@ function M.setupBuffer()
         BufCache[bufnr] = {setup_done=true, filename=filename, is_file=is_file}
         restore_vimmarks(bufnr)
         restore_extmarks(bufnr)
-        -- Register auto-saving
+        update_sign_column(bufnr)
+        -- Register auto saving/updating logic
         vim.api.nvim_create_autocmd({'BufLeave', 'BufWinLeave', 'BufHidden'}, {
             buffer = bufnr,
-            callback = function()
-                save_all(bufnr)
-            end,
+            callback = function() save_all(bufnr) end,
+        })
+        vim.api.nvim_create_autocmd('BufEnter', {
+            buffer = bufnr,
+            callback = function() update_sign_column(bufnr) end,
         })
         print('Buffer setup done for file:', filename)
     end
