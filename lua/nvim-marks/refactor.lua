@@ -300,7 +300,7 @@ local function save_note(edit_bufnr, target_bufnr, target_row)
         end_row=target_row-1,  -- extmark is 0-indexed
         end_col=0,
         sign_text='*',
-        sign_hl_group='WarningMsg',
+        sign_hl_group='Comment',
         virt_lines=virt_lines,
     })
     vim.cmd('bwipeout!')
@@ -352,8 +352,10 @@ function M.openMarks()
     end
     for _, item in ipairs(notes) do
         local _, row, virt_lines = unpack(item)
-        -- print(vim.inspect(virt_lines))  -- eg: {{{"line1", "Comment"}, {"line2", "Comment"}}}
-        local preview = '' --TODO: --virt_lines or virt_lines[1] or virt_lines[1][1][1]:sub(1, 24)
+        local preview = ''
+        if virt_lines and virt_lines[1] and virt_lines[1][1] then
+            preview = '>> ' .. virt_lines[1][1][1]:sub(1, 10) .. '...'
+        end
         local display = string.format("* %s:%d %s", BufCache[target_bufnr].filename, row, preview)
         table.insert(content_lines, display)
     end
@@ -377,15 +379,6 @@ function M.openMarks()
     end
     update_sign_column(target_bufnr)
 end
-
-function M.getAllMarks()
-    local all_marks = vim.fn.getmarklist()
-    for _, mark in ipairs(all_marks) do
-        local char, pos, filename = unpack(mark)
-        print(char, pos, filename, vim.inspect(mark))
-    end
-end
-
 
 --- On buffer init(once), restore marks from persistent file
 function M.setupBuffer()
