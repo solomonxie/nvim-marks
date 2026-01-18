@@ -12,7 +12,8 @@ local M = {}
 
 local utils = require('nvim-marks.utils')
 
-local ButSetupDone = {}
+local SetupStatusPerBuf = {}
+local GitBlamePerBuf = {}
 
 
 --- Swith to note editing mode allows user to type notes
@@ -132,6 +133,7 @@ end
 --- Save global vimmarks and local vimmarks+notes
 function M.save_all(bufnr)
     -- print('saving all for bufnr', bufnr)
+    local filename = vim.api.nvim_buf_get_name(bufnr)
     -- Save global vimmarks
     local global_marks = utils.scan_global_vimmarks()
     local json_path = utils.make_json_path('vimmarks_global')
@@ -146,7 +148,6 @@ function M.save_all(bufnr)
     local vimmarks = utils.scan_vimmarks(bufnr)
     local notes = utils.scan_notes(bufnr)
     local data = {vimmarks=vimmarks, notes=notes}
-    local filename = vim.api.nvim_buf_get_name(bufnr)
     json_path = utils.make_json_path(filename)
     -- print('saving marks', #vimmarks, #notes, 'to', json_path)
     if #vimmarks > 0 or #notes > 0 then
@@ -163,7 +164,8 @@ function M.setupBuffer()
     if not is_file then return end
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
     -- print('setting up buffer', bufnr)
-    if ButSetupDone[bufnr] == nil then
+    if GitBlamePerBuf[bufnr] == nil then GitBlamePerBuf[bufnr] = {} end
+    if SetupStatusPerBuf[bufnr] == nil then
         utils.restore_global_marks()
         utils.restore_local_marks(bufnr)
         utils.update_sign_column(bufnr)
@@ -176,7 +178,7 @@ function M.setupBuffer()
             buffer = bufnr,
             callback = function() utils.update_sign_column(bufnr) end,
         })
-        ButSetupDone[bufnr] = true
+        SetupStatusPerBuf[bufnr] = true
     end
 end
 
