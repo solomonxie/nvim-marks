@@ -75,7 +75,7 @@ function M.scan_global_vimmarks()
         if GitBlameCache[filename] == nil then
             M.update_git_blame(filename)
         end
-        local blame = GitBlameCache[filename][row] or {}
+        local blame = GitBlameCache[filename] and GitBlameCache[filename][row] or {}
         table.insert(global_marks, {char, row, filename, blame})
     end
     return global_marks
@@ -94,7 +94,7 @@ function M.scan_vimmarks(target_bufnr)
     for _, item in ipairs(vim.fn.getmarklist(target_bufnr)) do
         local char = item.mark:sub(2,2)
         local bufnr, row, _, _ = unpack(item.pos)
-        local blame = GitBlameCache[filename][row] or {}
+        local blame = GitBlameCache[filename] and GitBlameCache[filename][row] or {}
         if char:match('[a-z]') ~= nil then
             table.insert(vimmarks, {char, row, blame})
         end
@@ -113,7 +113,7 @@ function M.scan_notes(bufnr)
     if GitBlameCache[filename] == nil then
         M.update_git_blame(filename)
     end
-    local blame = GitBlameCache[filename][row] or {}
+    local blame = GitBlameCache[filename] and GitBlameCache[filename][row] or {}
     for _, ext in ipairs(items) do
         -- print('scanned an extmark', vim.inspect(ext))
         local mark_id, row, _, details = unpack(ext)  -- details: vim.api.keyset.set_extmark
