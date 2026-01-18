@@ -47,8 +47,8 @@ function M.openMarks()
     -- Render global marks
     local global_marks = utils.scan_global_vimmarks()
     for _, item in ipairs(global_marks) do
-        local char, row, filename = unpack(item)
-        local display = string.format("(%s) %s:%d", char, filename, row)
+        local char, row, global_filename = unpack(item)
+        local display = string.format("(%s) %s:%d", char, global_filename, row)
         table.insert(content_lines, display)
     end
     -- Render notes
