@@ -1,63 +1,96 @@
-local M = {}  -- Module to be required from outside
+--- NOTE:
+--- 1. We use native Vimmarks for marks, we use extmarks for notes
+--- 2. We try not to disrupt native vimmarks key bindings, will just forward the keystroke
+--- 3. We save all info into one local file involved all code files in the project.
+--- 4. For vim global marks (A-Z), the problem is that we cannot restore the mark without opening the file,
+---    which is tricky because we don't want to open a buffer which may trigger other plugin reactions.
+---    An easier way: we only restore marks upon BufEnter, if user wants to jump to global marks, has to jump from Marks window,
+---    so `'A` won't jump until buffer is opened at least once (unless viminfo/shada were enabled)
+--- 5. It should only care about the CURRENT BUFFER
 
-local NamespaceID = vim.api.nvim_create_namespace('nvim-marks')
-local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-local ValidGlobalChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
-local BCache = {}  --- @type table <integer, table> # {bufid=table_of_variables} Buffer scoped variables
+local M = {}
+
+local utils = require('nvim-marks.utils')
+
+local ButSetupDone = {}
 
 
---- @param bufid integer
---- @return table<string, table> # {char=details}
-local function list_marks(bufid)
-    local marks = {}  --- @type table<string, table>
-    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufid), ":.")
-    -- Nvim Extmarks
-    local extmarks = vim.api.nvim_buf_get_extmarks(bufid, NamespaceID, 0, -1, {details=true})
-    for _, ext in ipairs(extmarks) do
-        local mark_id, row, col, details = unpack(ext)
-        local char = details.sign_text:gsub('%s+', '') or '?'
-        if string.find(ValidMarkChars, char, 1, true) ~= nil then
-            local display = string.format("(%s) %s:%d", char, filename, row+1, col+1)
-            marks[char] = {name=char, row=row+1, filename=filename, display=display}
-        end
-    end
-    -- Vim global marks A-Z
-    for i=1, #ValidGlobalChars do
-        local char = ValidGlobalChars:sub(i,i)
-        local global_bufid, global_row, _, _ = unpack(vim.fn.getpos("'"..char))
-        row, col = unpack(vim.api.nvim_buf_get_mark(global_bufid, char))
-        if global_row > 0 and marks[char] == nil then
-            filename = vim.api.nvim_buf_get_name(global_bufid)
-            filename = vim.fn.fnamemodify(filename, ":.")
-            local display = string.format("(%s) %s:%d", char, filename, row)
-            marks[char] = {name=char, row=row, filename=filename, display=display}
-        end
-    end
-    return marks
+--- Swith to note editing mode allows user to type notes
+function M.switchEditMode(target_bufnr, target_row)
+    local edit_bufnr = M.create_window()
+    vim.api.nvim_buf_set_lines(edit_bufnr, 0, -1, false, {
+        '> Help: Press `S` edit; `q` Quit; `Ctrl-s` save and quit',
+    })
+    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() M.save_note(edit_bufnr, target_bufnr, target_row) end, {buffer=true, silent=true, nowait=true })
 end
 
---- @param bufid integer
---- @return table<string, table> # {char=details}
-local function list_notes(bufid)
-    local notes = {} -- @type hash_table{}
-    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufid), ":.")
-    local extmarks = vim.api.nvim_buf_get_extmarks(bufid, NamespaceID, 0, -1, {details=true})
-    for _, ext in ipairs(extmarks) do
-        local mark_id, row, col, details = unpack(ext)
-        local char = details.sign_text:sub(1, 1) or '?'
-        if char == '*' then
-            local name = tostring(mark_id)
-            local content = details.virt_lines
-            local preview = details.virt_lines and details.virt_lines[1][1][1]:sub(1, 10) or ''
-            local display = string.format("* %s:%d %s", filename, row+1, preview)
-            notes[name] = {name=name, row=row+1, filename=filename, display=display, content=content}
-        end
+function M.openMarks()
+    local target_bufnr = vim.api.nvim_get_current_buf()
+    local target_row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
+    local filename = vim.api.nvim_buf_get_name(target_bufnr)
+    -- Prepare content
+    local content_lines = {
+        '> Help: Press `a-Z` Add mark | `+` Add note | `-` Delete  | `*` List all | `q` Quit',
+    }
+    -- Render marks
+    local vimmarks = utils.scan_vimmarks(target_bufnr)
+    -- print('showing vimmarks', vim.inspect(vimmarks))
+    if #vimmarks > 0 then
+        table.insert(content_lines, '')
+        table.insert(content_lines, '--- Marks ---')
     end
-    return notes
+    for _, item in ipairs(vimmarks) do
+        local char, row = unpack(item)
+        local display = string.format("(%s) %s:%d", char, filename, row)
+        table.insert(content_lines, display)
+    end
+    -- Render global marks
+    local global_marks = utils.scan_global_vimmarks()
+    for _, item in ipairs(global_marks) do
+        local char, row, filename = unpack(item)
+        local display = string.format("(%s) %s:%d", char, filename, row)
+        table.insert(content_lines, display)
+    end
+    -- Render notes
+    local notes = utils.scan_notes(target_bufnr)
+    -- print('showing notes', vim.inspect(notes))
+    if #notes ~= 0 then
+        table.insert(content_lines, '')
+        table.insert(content_lines, '--- Notes ---')
+    end
+    for _, item in ipairs(notes) do
+        local _, row, virt_lines = unpack(item)
+        local preview = ''
+        if virt_lines and virt_lines[1] and virt_lines[1][1] then
+            preview = '>> ' .. virt_lines[1][1][1]:sub(1, 10) .. '...'
+        end
+        local display = string.format("* %s:%d %s", filename, row, preview)
+        table.insert(content_lines, display)
+    end
+    -- Create a window and display
+    local win_bufnr = M.create_window()
+    vim.api.nvim_buf_set_lines(win_bufnr, 0, -1, false, content_lines)
+    vim.cmd('setlocal readonly nomodifiable')
+    vim.cmd('redraw')
+    -- Listen for user's next keystroke
+    -- TODO: allow user to scroll
+    local key = vim.fn.getcharstr()
+    vim.cmd('bwipeout!')  -- Close window no matter what
+    if key == '-' then
+        utils.delete_vimmark(target_bufnr, target_row)
+        utils.delete_note(target_bufnr, target_row)
+    elseif key == "+" then
+        M.switchEditMode(target_bufnr, target_row)
+    elseif key == 'q' or key == '\3' or key == '\27' then  -- q | <Ctrl-c> | <ESC>
+        -- Do nothing.
+    elseif key:match('[a-zA-Z]') then  -- Any other a-zA-Z letter
+        utils.set_vimmark(target_bufnr, key, target_row)
+    end
+    utils.update_sign_column(target_bufnr)
 end
 
---- @return integer # Buffer id
-local function createWindow()
+--- @return integer # Mark-window's Buffer id
+function M.create_window()
     if vim.b.is_marks_window == true then vim.cmd('bwipeout!') end  -- Close existing quick window
     vim.cmd('botright 10 new')  -- Create new window and jump to the buffer context
     vim.b.is_marks_window = true
@@ -72,298 +105,81 @@ local function createWindow()
     return vim.api.nvim_get_current_buf()
 end
 
-local function delete_extmark(target_bufid, target_row)
-    local extmarks = vim.api.nvim_buf_get_extmarks(target_bufid, NamespaceID, {target_row-1, 0}, {target_row-1, -1}, {details=true})
-    for _, ext in ipairs(extmarks) do
-        local mark_id, row, _, details = unpack(ext)
-        local char = details.sign_text:sub(1, 1)
-        if row == target_row - 1 then
-            vim.api.nvim_buf_del_extmark(target_bufid, NamespaceID, mark_id)
-            -- Delete cache
-            if string.find(ValidMarkChars, char) ~= nil then
-                BCache[target_bufid].Marks[char] = nil
-            else
-                BCache[target_bufid].Notes[tostring(mark_id)] = nil
-            end
-        end
-    end
-end
-
-local function delete_vimmark(target_bufid, target_row)
-    for i=1, #ValidMarkChars do
-        local char = ValidMarkChars:sub(i,i)
-        local bufid, row, _, _ = unpack(vim.fn.getpos("'"..char))
-        if bufid == target_bufid and row == target_row then
-            vim.api.nvim_buf_del_mark(bufid, char)
-            BCache[target_bufid].Marks[char] = nil
-        elseif bufid ~= target_bufid and bufid ~= 0 then
-            -- Also remove mark(global) in another buffer
-            vim.api.nvim_buf_del_mark(bufid, char)
-            BCache[old_bufid].Marks[char] = nil  -- fixme: marks is nil when another buffer isn't opened
-            delete_extmark(old_bufid, old_row)
-            M.saveMarks(old_bufid)
-        end
-    end
-end
-
-local function is_real_file(bufid)
-    if type(bufid) ~= 'number' or not vim.api.nvim_buf_is_valid(bufid) then
-        return false
-    end
-    local buftype = vim.api.nvim_get_option_value("buftype", { buf = bufid })
-    if buftype ~= '' then
-        return false
-    end
-    local path = vim.api.nvim_buf_get_name(bufid)
-    if path == '' then
-        return false
-    end
-    return vim.fn.filereadable(path) == 1
-end
-
---- Marks go with project, better to be saved under project folder
---- Each file has its own persistent-marks file, just like vim `undofile`
---- TODO: accept customization of main folder instead of `.git/`
+--- Read from user edits, save it to an extmark attached to the target
 ---
---- @param source_path string # target buffer's file full path
---- @return string # converted final json path for the persistent marks
-local function make_json_path(source_path)
-    local flatten_name = vim.fn.fnamemodify(source_path, ':.'):gsub('/', '__'):gsub('\\', '__')
-    local proj_root = vim.fs.root(source_path, '.git')
-    if not proj_root then proj_root = '/tmp' end
-    local proj_name = vim.fn.fnamemodify(proj_root, ':t')
-    local json_path = proj_root .. '/.git/persistent_marks/' .. proj_name .. '/' .. flatten_name .. '.json'
-    return json_path
-end
-
---- @param data table
-local function save_json(data, json_path)
-    local json_data = vim.fn.json_encode(data)
-    -- Create folder if not exist
-    local target_dir = vim.fn.fnamemodify(json_path, ':p:h')
-    if vim.fn.isdirectory(target_dir) == 0 then
-        vim.fn.mkdir(target_dir, 'p')
-    end
-    local f = io.open(json_path, 'w')
-    if f then
-        f:write(json_data)
-        f:close()
-    else
-        print('Failed to write data to', json_path)
-    end
-end
-
---- @param json_path string
---- @return table|nil
-local function load_json(json_path)
-    local f = io.open(json_path, 'r')
-    if not f then return nil end
-    local content = f:read("*all")
-    f:close()
-    return vim.json.decode(content) or {}
-end
-
-function M.openMarks()
-    local main_bufid = vim.api.nvim_get_current_buf()  --- @type integer
-    local row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
-    local content_lines = {
-        '# Help: Press `a-Z` Add mark | `+` Add note | `-` Delete  | `*` List all | `q` Quit',
-    }
-    -- Display existing marks
-    local marks = list_marks(main_bufid)
-    if next(marks) ~= nil then
-        table.insert(content_lines, '')
-        table.insert(content_lines, '--- Marks ---')
-    end
-    for _, item in pairs(marks) do
-        table.insert(content_lines, item.display)
-    end
-    -- Display existing notes
-    local notes = list_notes(main_bufid)
-    if next(notes) ~= nil then
-        table.insert(content_lines, '')
-        table.insert(content_lines, '--- Notes ---')
-    end
-    for _, item in pairs(notes) do
-        table.insert(content_lines, item.display)
-    end
-    -- Render window content
-    local bufid = createWindow()
-    vim.api.nvim_buf_set_lines(bufid, 0, -1, false, content_lines)
-    vim.cmd('setlocal readonly nomodifiable')
-    vim.cmd('redraw')
-    -- Manually listen for keypress
-    local char = vim.fn.getcharstr()
-    if char == "+" then
-        M.editNote(main_bufid, row)
-    elseif char == '-' then
-        M.delMark(main_bufid, row)
-        vim.cmd('bwipeout!')
-    elseif char == '*' then
-        M.listGlobalMarks()
-    elseif char == 'q' or char == '\3' or char == '\27' then  -- q | <Ctrl-c> | <ESC>
-        vim.cmd('bwipeout!')
-    elseif string.find(ValidMarkChars, char, 1, true) then
-        M.addMark(main_bufid, row, char)
-        vim.cmd('bwipeout!')
-    end
-end
-
---- Add both Vim Mark & Neovim Extmark at current line
-function M.addMark(main_bufid, row, char)
-    -- Remove all existing marks at this row
-    M.delMark(main_bufid, row)
-    local mark_id = string.byte(char)
-    -- Add nvim extmark
-    vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
-        id=mark_id,
-        end_row=row-1,  -- TODO: allow multi-line mark/note
-        end_col=0,
-        sign_text=char,
-        sign_hl_group='Todo',
-    })
-    -- Add vim native mark
-    vim.api.nvim_buf_set_mark(main_bufid, char, row, 0, {})
-    -- Save
-    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(main_bufid), ":.")
-    local display = string.format("(%s) %s:%d", char, filename, row)
-    BCache[main_bufid].Marks[char] = {name=char, row=row, filename=filename, display=display}
-    M.saveMarks(main_bufid)
-    -- vim.cmd('bwipeout!')
-end
-
-function M.listGlobalMarks()
-    print('Listing global marks: TBD')
-    -- Source 1: all marks in the `persistent_marks.json`
-    -- Source 2: all Vim global marks with registry `A-Z`
-end
-
---- Enter into a light editor mode
---- TOOD: if note already exists at this row, edit instead of create
---- TODO: allow :w to save instead of <ctrl-s>
-function M.editNote(main_bufid, row)
-    local bufid = createWindow()
-    vim.api.nvim_set_option_value('filetype', 'markdown', { buf = bufid })
-    vim.api.nvim_buf_set_lines(bufid, 0, -1, false, {
-        '# Help: Press `S` edit; `q` Quit; `Ctrl-s` save and quit',
-    })
-    -- vim.cmd('startinsert')
-    vim.keymap.set({'n', 'i', 'v'}, '<C-s>', function() M.addNote(main_bufid, bufid, row) end, {buffer=true, silent=true, nowait=true })
-end
-
---- Remove all existing marks at this row
-function M.delMark(main_bufid, row)
-    delete_extmark(main_bufid, row)
-    delete_vimmark(main_bufid, row)
-    M.saveMarks(main_bufid)
-end
-
---- For simplicity, we don't mix note with marks, they're managed differently
-function M.addNote(main_bufid, bufid, row)
-    local text_lines = vim.api.nvim_buf_get_lines(bufid, 0, -1, false)
+--- @param edit_bufnr integer # editor-buffer's id
+--- @param target_bufnr integer # target-buffer's id
+--- @param target_row integer # target-buffer's row number
+function M.save_note(edit_bufnr, target_bufnr, target_row)
     local virt_lines = {}
-    for _, line in ipairs(text_lines) do
+    local read_lines = vim.api.nvim_buf_get_lines(edit_bufnr, 0, -1, false)
+    for _, line in ipairs(read_lines) do
         table.insert(virt_lines, {{line, "Comment"}})
     end
-    local mark_id = math.random(1000, 9999)
-    vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, row - 1, 0, {
-        id=mark_id,  --- @type number
-        end_row=row-1,  -- TODO: allow multi-line mark/note
+    vim.api.nvim_buf_set_extmark(target_bufnr, NS_Notes, target_row-1, 0, {
+        id=math.random(1000, 9999),
+        end_row=target_row-1,  -- extmark is 0-indexed
         end_col=0,
         sign_text='*',
-        sign_hl_group='Todo',
+        sign_hl_group='Comment',
         virt_lines=virt_lines,
     })
-    -- Save
-    local name = tostring(mark_id)
-    local content = table.concat(text_lines, '  ')
-    local preview = content:sub(1, 10)
-    local display = string.format("* %s:%d %s", filename, row, preview)
-    BCache[main_bufid].Notes[name] = {name=name, row=row, filename=filename, display=display, lines=virt_lines}
-    M.saveMarks(main_bufid)
-    vim.cmd('stopinsert')
     vim.cmd('bwipeout!')
+    vim.cmd('stopinsert!')
+    utils.update_sign_column(target_bufnr)
 end
 
---- Collect marks/notes from current buffer and save to a local file
---- Triggered by schedule, BufLeave|VimLeave or manually
----
---- @param bufid integer # target buffer id
-function M.saveMarks(bufid)
-    local source_path = vim.api.nvim_buf_get_name(bufid)
-    local json_path = make_json_path(source_path)
-    if next(BCache[bufid].Marks) == nil and next(BCache[bufid].Notes) == nil then
-        local result = vim.fn.delete(json_path)
-        return
+--- Save global vimmarks and local vimmarks+notes
+function M.save_all(bufnr)
+    -- print('saving all for bufnr', bufnr)
+    -- Save global vimmarks
+    local global_marks = utils.scan_global_vimmarks()
+    local json_path = utils.make_json_path('vimmarks_global')
+    -- print('saving global marks of', #global_marks, 'to', json_path)
+    if #global_marks > 0 then
+        utils.save_json(global_marks, json_path)
+    else
+        os.remove(json_path)
     end
-    local data = {path = source_path, marks = BCache[bufid].Marks, notes = BCache[bufid].Notes}
-    save_json(data, json_path)
+    if bufnr == nil then return end
+    -- Save buffer-only vimmarks+notes
+    local vimmarks = utils.scan_vimmarks(bufnr)
+    local notes = utils.scan_notes(bufnr)
+    local data = {vimmarks=vimmarks, notes=notes}
+    local filename = vim.api.nvim_buf_get_name(bufnr)
+    json_path = utils.make_json_path(filename)
+    -- print('saving marks', #vimmarks, #notes, 'to', json_path)
+    if #vimmarks > 0 or #notes > 0 then
+        utils.save_json(data, json_path)
+    else
+        os.remove(json_path) -- Delete empty files if no marks at all
+    end
 end
 
---- Restore marks/notes from the local file to current buffer
---- Trigger once at buffer's 1st load
-function M.loadMarks()
-    local main_bufid = vim.api.nvim_get_current_buf()
-    if not is_real_file(main_bufid) then
-        return
-    end
-    local source_path = vim.api.nvim_buf_get_name(main_bufid)
-    local json_path = make_json_path(source_path)
-    if vim.fn.filereadable(json_path) == 0 then
-        return
-    end
-    local data = load_json(json_path) or {marks={}, notes={}}
-    if BCache[main_bufid] == nil then BCache[main_bufid] = {} end
-    -- Update buffer cache
-    BCache[main_bufid].Marks = data.marks or {}
-    BCache[main_bufid].Notes = data.notes or {}
-    -- Load marks
-    for char, details in pairs(data.marks) do
-        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row - 1, 0, {
-            id=string.byte(char),
-            end_row=details.row - 1,
-            end_col=0,
-            sign_text=char,
-            sign_hl_group='Todo',
-        })  -- Neovim
-        vim.api.nvim_buf_set_mark(main_bufid, char, details.row, 0, {})  -- Vim
-    end
-    -- Load notes
-    for name, details in pairs(data.notes) do
-        local mark_id = tonumber(name)
-        vim.api.nvim_buf_set_extmark(main_bufid, NamespaceID, details.row - 1, 0, {
-            id=mark_id,
-            end_row=details.row - 1,
-            end_col=0,
-            sign_text='*',
-            sign_hl_group='Todo',
-            virt_lines=details.lines,
+--- On buffer init(once), restore marks from persistent file
+function M.setupBuffer()
+    local bufnr = vim.api.nvim_get_current_buf()
+    local is_file = utils.is_real_file(bufnr)
+    if not is_file then return end
+    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
+    -- print('setting up buffer', bufnr)
+    if ButSetupDone[bufnr] == nil then
+        utils.restore_global_marks()
+        utils.restore_local_marks(bufnr)
+        utils.update_sign_column(bufnr)
+        -- Register auto saving/updating logic
+        vim.api.nvim_create_autocmd({'BufLeave', 'BufWinLeave', 'BufHidden'}, {
+            buffer = bufnr,
+            callback = function() M.save_all(bufnr) end,
         })
+        vim.api.nvim_create_autocmd('BufEnter', {
+            buffer = bufnr,
+            callback = function() utils.update_sign_column(bufnr) end,
+        })
+        ButSetupDone[bufnr] = true
     end
 end
 
-function M.bufferSetup(opt)
-    -- Setup buffer variables
-    local main_bufid = vim.api.nvim_get_current_buf()
-    if BCache[main_bufid] == nil then
-        BCache[main_bufid] = {Marks={}, Notes={}}
-    end
-    if BCache[main_bufid] and BCache[main_bufid].is_setup_done == true then
-        return
-    end
-    if BCache[main_bufid].Marks == nil then
-        BCache[main_bufid].Marks = {}
-    end
-    if BCache[main_bufid].Notes == nil then
-        BCache[main_bufid].Notes = {}
-    end
-    M.loadMarks()
-    vim.api.nvim_create_autocmd({ 'BufLeave', 'BufWinLeave', 'BufHidden' }, {
-        buffer = main_bufid,
-        callback = function() M.saveMarks(main_bufid) end,
-    })
-    BCache[main_bufid].is_setup_done = true
-end
 
 function M.setup(opt)
     -- TODO: handle options (file location, keymaps, etc)
