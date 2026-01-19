@@ -117,7 +117,7 @@ function M.save_note(edit_bufnr, target_bufnr, target_row)
     for _, line in ipairs(read_lines) do
         table.insert(virt_lines, {{line, "Comment"}})
     end
-    vim.api.nvim_buf_set_extmark(target_bufnr, NS_Notes, target_row-1, 0, {
+    vim.api.nvim_buf_set_extmark(target_bufnr, utils.NS_Notes, target_row-1, 0, {
         id=math.random(1000, 9999),
         end_row=target_row-1,  -- extmark is 0-indexed
         end_col=0,
