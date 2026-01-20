@@ -12,7 +12,7 @@ local M = {}
 
 local utils = require('nvim-marks.utils')
 
-local SetupStatusPerBuf = {}
+local IsBufferSetup = {}
 local GitBlamePerBuf = {}
 
 
@@ -35,7 +35,6 @@ function M.openMarks()
     }
     -- Render marks
     local vimmarks = utils.scan_vimmarks(target_bufnr)
-    -- print('showing vimmarks', vim.inspect(vimmarks))
     if #vimmarks > 0 then
         table.insert(content_lines, '')
         table.insert(content_lines, '# Marks')
@@ -54,7 +53,6 @@ function M.openMarks()
     end
     -- Render notes
     local notes = utils.scan_notes(target_bufnr)
-    -- print('showing notes', vim.inspect(notes))
     if #notes ~= 0 then
         table.insert(content_lines, '')
         table.insert(content_lines, '# Notes')
@@ -87,7 +85,7 @@ function M.openMarks()
     elseif key:match('[a-zA-Z]') then  -- Any other a-zA-Z letter
         utils.set_vimmark(target_bufnr, key, target_row)
     end
-    utils.update_sign_column(target_bufnr)
+    utils.refresh_sign_bar(target_bufnr)
 end
 
 --- @return integer # Mark-window's Buffer id
@@ -127,20 +125,18 @@ function M.save_note(edit_bufnr, target_bufnr, target_row)
     })
     vim.cmd('bwipeout!')
     vim.cmd('stopinsert!')
-    utils.update_sign_column(target_bufnr)
+    utils.refresh_sign_bar(target_bufnr)
 end
 
 --- Save global vimmarks and local vimmarks+notes
 function M.save_all(bufnr)
-    -- print('saving all for bufnr', bufnr)
     local filename = vim.api.nvim_buf_get_name(bufnr)
-    if utils.GitBlameCache[filename] == nil then
-        utils.GitBlameCache[filename] = M.git_blame(filename)
+    if utils.BlameCache[filename] == nil then
+        utils.BlameCache[filename] = M.git_blame(filename)
     end
     -- Save global vimmarks
     local global_marks = utils.scan_global_vimmarks()
     local json_path = utils.make_json_path('vimmarks_global')
-    -- print('saving global marks of', #global_marks, 'to', json_path)
     if #global_marks > 0 then
         utils.save_json(global_marks, json_path)
     else
@@ -152,7 +148,6 @@ function M.save_all(bufnr)
     local notes = utils.scan_notes(bufnr)
     local data = {vimmarks=vimmarks, notes=notes}
     json_path = utils.make_json_path(filename)
-    -- print('saving marks', #vimmarks, #notes, 'to', json_path)
     if #vimmarks > 0 or #notes > 0 then
         utils.save_json(data, json_path)
     else
@@ -166,13 +161,13 @@ function M.setupBuffer()
     local is_file = utils.is_real_file(bufnr)
     if not is_file then return end
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
-    -- print('setting up buffer', bufnr)
     if GitBlamePerBuf[bufnr] == nil then GitBlamePerBuf[bufnr] = {} end
-    if SetupStatusPerBuf[bufnr] == nil then
-        utils.GitBlameCache[filename] = utils..git_blame(filename)
+    if IsBufferSetup[bufnr] == nil then
+        utils.BlameCache[filename] = utils.git_blame(filename)
+        utils.RenameHistory[filename] = utils.git_rename_history(filename)
         utils.restore_global_marks()
-        utils.restore_local_marks(bufnr)
-        utils.update_sign_column(bufnr)
+        utils.restore_marks(bufnr)
+        utils.refresh_sign_bar(bufnr)
         -- Register auto saving/updating logic
         vim.api.nvim_create_autocmd({'BufLeave', 'BufWinLeave', 'BufHidden'}, {
             buffer = bufnr,
@@ -180,9 +175,9 @@ function M.setupBuffer()
         })
         vim.api.nvim_create_autocmd('BufEnter', {
             buffer = bufnr,
-            callback = function() utils.update_sign_column(bufnr) end,
+            callback = function() utils.refresh_sign_bar(bufnr) end,
         })
-        SetupStatusPerBuf[bufnr] = true
+        IsBufferSetup[bufnr] = true
     end
 end
 

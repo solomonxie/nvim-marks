@@ -2,8 +2,8 @@ local M = {}
 
 M.NS_Signs = vim.api.nvim_create_namespace('nvim-marks.signs')
 M.NS_Notes = vim.api.nvim_create_namespace('nvim-marks.notes')
-M.GitBlameCache = {}  --- @type table{string, table}  # {filename={blame_tuple}}
-M.FilenameCache = {}  --- @type table{string, table}  # {filename={name1, name2}}
+M.BlameCache = {}  --- @type table{string, table}  # {filename={blame_tuple}}
+M.RenameHistory = {}  --- @type table{string, table}  # {filename={name1, name2}}
 
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
@@ -74,11 +74,16 @@ function M.scan_global_vimmarks()
         local char = item.mark:sub(2,2)
         local bufnr, row, _, _ = unpack(item.pos)
         local filename = vim.fn.fnamemodify(item.file, ":.")
-        if M.GitBlameCache[filename] == nil then
-            M.GitBlameCache[filename] = M.git_blame(filename)
+        local renames = RenameHistory[filename]
+        if renames == nil then RenameHistory[filename] = M.git_rename_history(filename) end
+        for _, fn in ipair(renames) do
+            if M.BlameCache[fn] == nil then M.BlameCache[fn] = M.git_blame(fn) end
+            if M.BlameCache[fn] ~= nil and M.BlameCache[fn][row] ~! nil then
+                local blame = M.BlameCache[fn][row]
+                table.insert(global_marks, {char, row, fn, blame})
+            end
         end
-        local blame = M.GitBlameCache[filename] and M.GitBlameCache[filename][row] or {}
-        table.insert(global_marks, {char, row, filename, blame})
+
     end
     return global_marks
 end
@@ -92,7 +97,7 @@ function M.scan_vimmarks(target_bufnr)
     for _, item in ipairs(vim.fn.getmarklist(target_bufnr)) do
         local char = item.mark:sub(2,2)
         local bufnr, row, _, _ = unpack(item.pos)
-        local blame = M.GitBlameCache[filename] and M.GitBlameCache[filename][row] or {}
+        local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
         if char:match('[a-z]') ~= nil then
             table.insert(vimmarks, {char, row, blame})
         end
@@ -107,9 +112,8 @@ function M.scan_notes(bufnr)
     local notes = {}
     local items = vim.api.nvim_buf_get_extmarks(bufnr, M.NS_Notes, 0, -1, {details=true})
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
-    local blame = M.GitBlameCache[filename] and M.GitBlameCache[filename][row] or {}
+    local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
     for _, ext in ipairs(items) do
-        -- print('scanned an extmark', vim.inspect(ext))
         local mark_id, row, _, details = unpack(ext)  -- details: vim.api.keyset.set_extmark
         table.insert(notes, {mark_id, row+1, details.virt_lines, blame})
     end
@@ -170,7 +174,7 @@ function M.restore_global_marks()
     end
 end
 
-function M.restore_local_marks(bufnr)
+function M.restore_marks(bufnr)
     -- todo: smart matching
     -- issue: 1) target filename change; 2) in case of change, how to read whole file to find match
     local filename = vim.api.nvim_buf_get_name(bufnr)
@@ -199,7 +203,7 @@ end
 
 --- Scan latest vimmarks and update left sign bar
 --- Don't use vim native signs like `sign_define/sign_place` because neovim will create extmarks anyways
-function M.update_sign_column(bufnr)
+function M.refresh_sign_bar(bufnr)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Get real bufnr (0 means current)
     local vimmarks = M.scan_vimmarks(bufnr)  --  mark={char, filename, row}
     vim.api.nvim_buf_clear_namespace(bufnr, M.NS_Signs, 0, -1)  -- Delete all signs then add each
@@ -216,7 +220,6 @@ function M.update_sign_column(bufnr)
     end
     -- Global signs
     local global_marks = M.scan_global_vimmarks()  --  mark={char, filename, row}
-    -- print('updating global_marks', #global_marks, 'signs for', bufnr)
     local buf_filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
     for _, item in ipairs(global_marks) do
         local char, row, filename, _ = unpack(item)
@@ -241,11 +244,10 @@ end
 --- @return string[] # [filename1, filename2...]
 function M.git_rename_history(filename)
     local cmd = string.format('git log --follow --name-only --format="" %s |uniq', filename)
-    -- print('Executing cmd', vim.inspect(cmd))
     local obj = vim.system({'sh', '-c', cmd}, {text = true}):wait()
     if obj.code ~= 0 then
         --- Files not tracked by git won't return data
-        -- print('Git blame failed: ' .. obj.stderr)
+        -- print('Command failed: ' .. obj.stderr)
         return {}
     end
     local names = {}
@@ -263,11 +265,10 @@ end
 --- @return string[] # Array of blamed hash items [{details}, {details}]
 function M.git_blame(filename)
     local cmd = { 'git', 'blame', '--date=unix', '-c', filename }
-    -- print('Executing cmd', vim.inspect(cmd))
     local obj = vim.system(cmd, {text = true}):wait()
     if obj.code ~= 0 then
         --- Files not tracked by git won't return data
-        -- print('Git blame failed: ' .. obj.stderr)
+        -- print('Command failed: ' .. obj.stderr)
         return {}
     end
     local lines = vim.split(obj.stdout, '[\r\n]+')
@@ -290,7 +291,6 @@ function M.git_blame(filename)
         -- row=8, prev=5, next=10
         -- row=9, prev=6, next=10
         -- row=10, prev=7, next=10
-        -- print('blamed', filename, line)
         local prev_pos = math.max(1, i-3)
         local next_pos = math.min(#line, i+3)
         local prev = table.concat(vim.list_slice(lines, prev_pos, i), '\n')
@@ -306,7 +306,6 @@ function M.git_blame(filename)
             prev = prev,
             next = next,
         }
-        -- print('parsed info', vim.inspect(info))
         table.insert(blames, info)
         ::continue::
     end

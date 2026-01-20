@@ -7,12 +7,14 @@ Persistent marks and annotations for Neovim that survive code changes, branch sw
 
 ## ✨ Features
 
-- **🔄 Persistent Marks**: Marks that survive across sessions, branch switches, and code changes
-- **🧠 Smart Matching**: Intelligent position restoration using git blame, line content, and surrounding context
-- **📁 Project-Scoped**: Storage organized per project in `.git/persistent_marks/`
-- **📍 Dual Support**: Works with both Vim marks (a-z, A-Z) and Extmarks for annotations
-- **👁️ Visual Indicators**: Sign column shows all marks and notes at a glance
-- **⚡ Automatic**: Save/restore marks automatically on buffer events
+- [x] **Persistent Marks**: Marks that survive across sessions, branch switches, and code changes
+- [x] **Smart Matching**: Intelligent position restoration using git blame, line content, and surrounding context
+- [x] **Project-Scoped**: Storage organized per project in `.git/persistent_marks/`
+- [x] **Dual Support**: Works with both Vim marks (a-z, A-Z) and Extmarks for annotations
+- [x] **Visual Indicators**: Sign column shows all marks and notes at a glance
+- [x] **Automatic**: Save/restore marks automatically on buffer events
+- [ ] Match marks after file renamed
+
 
 ## 📋 Requirements
 
