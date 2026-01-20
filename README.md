@@ -16,7 +16,7 @@ Persistent marks and annotations for Neovim that survive code changes, branch sw
 - [ ] Smart match each mark on restoring each buffer
 - [ ] Match marks after file renamed
 
-<img width="935" height="685" alt="Xnip2026-01-20_10-13-47" src="https://github.com/user-attachments/assets/554d6f04-e274-4bbf-bd24-4789320b1d10" />
+<img width="936" height="607" alt="Xnip2026-01-20_10-26-32" src="https://github.com/user-attachments/assets/0f1b306a-e61c-42a3-be61-33a4bb9ec3ac" />
 
 
 ## 📋 Requirements
