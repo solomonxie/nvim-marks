@@ -187,6 +187,18 @@ end
 function M.save_all(bufnr)
     M.update_git_blame_cache()  -- Update latest blames before saving (could be changed by external editors)
     local filename = vim.api.nvim_buf_get_name(bufnr)
+    if bufnr == nil then return end
+    -- Save local vimmarks+notes
+    local vimmarks = M.scan_vimmarks(bufnr)
+    local notes = M.scan_notes(bufnr)
+    json_path = M.make_json_path(filename)
+    -- print('saving vimmarks/notes to', #vimmarks, #notes, json_path)
+    if #vimmarks > 0 or #notes > 0 then
+        local data = {vimmarks=vimmarks, notes=notes}
+        M.save_json(data, json_path)
+    else
+        os.remove(json_path) -- Delete empty files if no marks at all
+    end
     -- Save global vimmarks
     local global_marks = M.scan_global_vimmarks()
     local json_path = M.make_json_path('vimmarks_global')
@@ -194,18 +206,6 @@ function M.save_all(bufnr)
         M.save_json(global_marks, json_path)
     else
         os.remove(json_path)
-    end
-    if bufnr == nil then return end
-    -- Save buffer-only vimmarks+notes
-    local vimmarks = M.scan_vimmarks(bufnr)
-    local notes = M.scan_notes(bufnr)
-    local data = {vimmarks=vimmarks, notes=notes}
-    json_path = M.make_json_path(filename)
-    print('saving vimmarks/notes to', #vimmarks, #notes, json_path)
-    if #vimmarks > 0 or #notes > 0 then
-        M.save_json(data, json_path)
-    else
-        os.remove(json_path) -- Delete empty files if no marks at all
     end
 end
 
