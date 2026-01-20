@@ -81,11 +81,11 @@ function M.update_git_blame_cache()
     -- Scan files in each local mark file
     for path, _ in vim.fs.dir(json_path) do
         local data = M.load_json(json_path) or {vimmarks={}, notes={}}
-        for _, item in data['vimmarks'] do
+        for _, item in ipairs(data['vimmarks'] or {}) do
             local _, _, filename, _ = unpack(item)
             if filename ~= nil then marked_files[filename] = true end
         end
-        for _, item in data['notes'] do
+        for _, item in ipairs(data['notes'] or {}) do
             local _, _, filename, _, _ = unpack(item)
             if filename ~= nil then marked_files[filename] = true end
         end
@@ -184,6 +184,31 @@ function M.delete_note(target_bufnr, target_row)
     end
 end
 
+--- Save global vimmarks and local vimmarks+notes
+function M.save_all(bufnr)
+    M.update_git_blame_cache()  -- Update latest blames before saving (could be changed by external editors)
+    local filename = vim.api.nvim_buf_get_name(bufnr)
+    -- Save global vimmarks
+    local global_marks = M.scan_global_vimmarks()
+    local json_path = M.make_json_path('vimmarks_global')
+    if #global_marks > 0 then
+        M.save_json(global_marks, json_path)
+    else
+        os.remove(json_path)
+    end
+    if bufnr == nil then return end
+    -- Save buffer-only vimmarks+notes
+    local vimmarks = M.scan_vimmarks(bufnr)
+    local notes = M.scan_notes(bufnr)
+    local data = {vimmarks=vimmarks, notes=notes}
+    json_path = M.make_json_path(filename)
+    -- print('saving vimmarks/notes to', #vimmarks, #notes, json_path)
+    if #vimmarks > 0 or #notes > 0 then
+        M.save_json(data, json_path)
+    else
+        os.remove(json_path) -- Delete empty files if no marks at all
+    end
+end
 
 function M.restore_global_marks()
     local json_path = M.make_json_path('vimmarks_global')
@@ -210,7 +235,10 @@ function M.restore_marks(bufnr)
     for _, item in ipairs(data['vimmarks'] or {}) do
         local char, old_row, old_filename, old_blame = unpack(item)
         local row = M.smart_match(bufnr, old_row, old_filename, old_blame)
-        vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
+        -- print('Smart matched', old_row, 'vs', row, 'for', old_filename)
+        if row > 0 then
+            vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
+        end
     end
     -- Restore local notes
     for _, ext in ipairs(data['notes'] or {}) do
@@ -231,15 +259,22 @@ end
 --- Smart matching
 ---
 --- @return integer # matched latest row number of given info (-1 > no any confident matching found)
-function smart_match(bufnr, old_row, old_filename, old_blame)
-    local renames = RenameHistory[old_filename] or {}
-    for _, filename in ipairs(renames) do
-        local latest_blame = BlameCache[filename] and BlameCache[filename][old_row] or {}
+function M.smart_match(bufnr, old_row, old_filename, old_blame)
+    local search_files = M.RenameHistory[old_filename] or {}
+    -- Ensure current filename is in the list to search if it's the same file
+    local current_filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
+    local found_current = false
+    for _, f in ipairs(search_files) do
+        if f == current_filename then found_current = true; break end
+    end
+    if not found_current then table.insert(search_files, 1, current_filename) end
+
+    for _, filename in ipairs(search_files) do
+        local latest_blame = M.BlameCache[filename] and M.BlameCache[filename][old_row] or {}
         local latest_content = latest_blame.content or ''
         local old_content = old_blame.content or ''
-        print('Found the latest blame of row', old_row, latest_content, old_content)
-        -- Start to calculate matching score
-        local similarity = M.levenshtein_distance(old_blame.content, latest_blame.content)
+        -- Start to calculate matching score at original row
+        local similarity = M.levenshtein_distance(old_content, latest_content)
         if similarity >= 90 then
             return old_row
         end
@@ -247,20 +282,38 @@ function smart_match(bufnr, old_row, old_filename, old_blame)
         local best_match = -1
         local best_similarity = -1
         local total_lines = vim.api.nvim_buf_line_count(bufnr)
+        local blames = M.BlameCache[filename] or {}
         for new_row=1, total_lines do
-            local new_blame = BlameCache[filename] and BlameCache[filename][new_row] or {}
-            local content_similarity = M.levenshtein_distance(old_content, new_blame.content)
-            local row_similarity = (1- (math.abs(old_row - new_row)/total_lines)) * 100
-            local percentile_similarity = (1- (math.abs(old_blame.percentile - new_blame.percentile)/100)) * 100
-            local prev_similarity = M.levenshtein_distance(old_blame.prev, new_blame.prev)
-            local next_similarity = M.levenshtein_distance(old_blame.next, new_blame.next)
-            -- calculate similarity score
-            local overall_similarity = (content_similarity + row_similarity + percentile_similarity + prev_similarity + next_similarity)/500 *100
-            if overall_similarity > 90 and overall_similarity > best_similarity then
+            local new_blame = blames[new_row] or {}
+            local content_similarity = M.levenshtein_distance(old_content, new_blame.content or '')
+            -- Basic row similarity (closeness to original row)
+            local row_dist = math.abs(old_row - new_row)
+            local row_similarity = (1 - (row_dist / total_lines)) * 100
+            -- Percentile similarity
+            local old_pct = old_blame.percentile or 0
+            local new_pct = new_blame.percentile or 0
+            local percentile_similarity = (1 - (math.abs(old_pct - new_pct) / 100)) * 100
+            -- Context similarity
+            local prev_similarity = M.levenshtein_distance(old_blame.prev or '', new_blame.prev or '')
+            local next_similarity = M.levenshtein_distance(old_blame.next or '', new_blame.next or '')
+            -- calculate overall similarity score
+            local overall_similarity = (content_similarity * 0.5) + (row_similarity * 0.1) +
+                                       (percentile_similarity * 0.1) + (prev_similarity * 0.15) + (next_similarity * 0.15)
+
+            if overall_similarity > 85 and overall_similarity > best_similarity then
+                best_similarity = overall_similarity
                 best_match = new_row
             end
         end
-        return new_row
+
+        if best_match ~= -1 then
+            return best_match
+        end
+    end
+    -- Last resort: if same row content is decent, use it even if not "great"
+    local current_blame = M.BlameCache[current_filename] and M.BlameCache[current_filename][old_row] or {}
+    if M.levenshtein_distance(old_blame.content or '', current_blame.content or '') > 50 then
+        return old_row
     end
     return -1
 end
@@ -341,37 +394,26 @@ function M.git_blame(filename)
     for i=1, #lines do
         --- e.g., a3672a14        (My Name     1768430769      14)if anything then...
         --- e.g., 00000000        (Not Committed Yet      1768707934      15)local SetupStatusPerBuf = ...
-        line = vim.trim(lines[i])
-        local commit_id, author, timestamp, row, content = line:match("^(%x+)%s+%(%s*(.-)\t+(%d+)\t+(%d+)%)(.*)$")
-        if row == nil or content == nil then goto continue end
-        -- Find surroundings:
-        -- if 10 rows total:
-        -- row=1, prev=1, next=4
-        -- row=2, prev=1, next=5
-        -- row=3, prev=1, next=6
-        -- row=4, prev=1, next=7
-        -- row=5, prev=2, next=8
-        -- row=6, prev=3, next=9
-        -- row=7, prev=4, next=10
-        -- row=8, prev=5, next=10
-        -- row=9, prev=6, next=10
-        -- row=10, prev=7, next=10
+        local line_str = vim.trim(lines[i])
+        local commit_id, author, timestamp, row_str, content = line_str:match("^(%x+)%s+%(%s*(.-)\t+(%d+)\t+(%d+)%)(.*)$")
+        if row_str == nil or content == nil then goto continue end
+        local row = tonumber(row_str)
         local prev_pos = math.max(1, i-3)
-        local next_pos = math.min(#line, i+3)
-        local prev = table.concat(vim.list_slice(lines, prev_pos, i), '\n')
-        local next = table.concat(vim.list_slice(lines, i, next_pos), '\n')
-        local percentile = math.floor((row / #lines) * 100) -- Rough positions (1-100%)
+        local next_pos = math.min(#lines, i+3)
+        local prev_lines = {}
+        for j = prev_pos, i-1 do table.insert(prev_lines, lines[j]) end
+        local next_lines = {}
+        for j = i+1, next_pos do table.insert(next_lines, lines[j]) end
         local info = {
             commit_id = commit_id,
             author = author,
             timestamp = timestamp,
-            -- row = row,
-            percentile = percentile,
+            percentile = math.floor((row / #lines) * 100),
             content = content,
-            prev = prev,
-            next = next,
+            prev = table.concat(prev_lines, '\n'),
+            next = table.concat(next_lines, '\n'),
         }
-        table.insert(blames, info)
+        blames[row] = info
         ::continue::
     end
     return blames

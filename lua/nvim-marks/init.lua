@@ -127,31 +127,6 @@ function M.save_note(edit_bufnr, target_bufnr, target_row)
     utils.refresh_sign_bar(target_bufnr)
 end
 
---- Save global vimmarks and local vimmarks+notes
-function M.save_all(bufnr)
-    utils.update_git_blame_cache()  -- Update latest blames before saving (could be changed by external editors)
-    local filename = vim.api.nvim_buf_get_name(bufnr)
-    -- Save global vimmarks
-    local global_marks = utils.scan_global_vimmarks()
-    local json_path = utils.make_json_path('vimmarks_global')
-    if #global_marks > 0 then
-        utils.save_json(global_marks, json_path)
-    else
-        os.remove(json_path)
-    end
-    if bufnr == nil then return end
-    -- Save buffer-only vimmarks+notes
-    local vimmarks = utils.scan_vimmarks(bufnr)
-    local notes = utils.scan_notes(bufnr)
-    local data = {vimmarks=vimmarks, notes=notes}
-    json_path = utils.make_json_path(filename)
-    if #vimmarks > 0 or #notes > 0 then
-        utils.save_json(data, json_path)
-    else
-        os.remove(json_path) -- Delete empty files if no marks at all
-    end
-end
-
 --- On buffer init(once), restore marks from persistent file
 function M.setupBuffer()
     local bufnr = vim.api.nvim_get_current_buf()
@@ -166,7 +141,7 @@ function M.setupBuffer()
         -- Register auto saving/updating logic
         vim.api.nvim_create_autocmd('BufHidden', {  -- BufHidden include BufLeave/BufWinLeave
             buffer = bufnr,
-            callback = function() M.save_all(bufnr) end,
+            callback = function() utils.save_all(bufnr) end,
         })
         vim.api.nvim_create_autocmd('BufEnter', {
             buffer = bufnr,
