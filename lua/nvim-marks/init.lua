@@ -38,7 +38,7 @@ function M.openMarks()
     -- print('showing vimmarks', vim.inspect(vimmarks))
     if #vimmarks > 0 then
         table.insert(content_lines, '')
-        table.insert(content_lines, '--- Marks ---')
+        table.insert(content_lines, '# Marks')
     end
     for _, item in ipairs(vimmarks) do
         local char, row = unpack(item)
@@ -57,13 +57,13 @@ function M.openMarks()
     -- print('showing notes', vim.inspect(notes))
     if #notes ~= 0 then
         table.insert(content_lines, '')
-        table.insert(content_lines, '--- Notes ---')
+        table.insert(content_lines, '# Notes')
     end
     for _, item in ipairs(notes) do
         local _, row, virt_lines = unpack(item)
         local preview = ''
         if virt_lines and virt_lines[1] and virt_lines[1][1] then
-            preview = '>> ' .. virt_lines[1][1][1]:sub(1, 10) .. '...'
+            preview = '>> ' .. virt_lines[1][1][1]:sub(1, 30) .. '...'
         end
         local display = string.format("* %s:%d %s", filename, row, preview)
         table.insert(content_lines, display)
@@ -134,6 +134,9 @@ end
 function M.save_all(bufnr)
     -- print('saving all for bufnr', bufnr)
     local filename = vim.api.nvim_buf_get_name(bufnr)
+    if utils.GitBlameCache[filename] == nil then
+        utils.GitBlameCache[filename] = M.git_blame(filename)
+    end
     -- Save global vimmarks
     local global_marks = utils.scan_global_vimmarks()
     local json_path = utils.make_json_path('vimmarks_global')
@@ -166,6 +169,7 @@ function M.setupBuffer()
     -- print('setting up buffer', bufnr)
     if GitBlamePerBuf[bufnr] == nil then GitBlamePerBuf[bufnr] = {} end
     if SetupStatusPerBuf[bufnr] == nil then
+        utils.GitBlameCache[filename] = utils..git_blame(filename)
         utils.restore_global_marks()
         utils.restore_local_marks(bufnr)
         utils.update_sign_column(bufnr)

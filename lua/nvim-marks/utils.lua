@@ -2,9 +2,10 @@ local M = {}
 
 M.NS_Signs = vim.api.nvim_create_namespace('nvim-marks.signs')
 M.NS_Notes = vim.api.nvim_create_namespace('nvim-marks.notes')
+M.GitBlameCache = {}  --- @type table{string, table}  # {filename={blame_tuple}}
+M.FilenameCache = {}  --- @type table{string, table}  # {filename={name1, name2}}
 
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
-local GitBlameCache = {}  --- @type table{string, table}  # {filename={blame_tuple}}
 
 function M.is_real_file(bufnr)
     if type(bufnr) ~= 'number' or not vim.api.nvim_buf_is_valid(bufnr) then
@@ -73,10 +74,10 @@ function M.scan_global_vimmarks()
         local char = item.mark:sub(2,2)
         local bufnr, row, _, _ = unpack(item.pos)
         local filename = vim.fn.fnamemodify(item.file, ":.")
-        if GitBlameCache[filename] == nil then
-            GitBlameCache[filename] = M.git_blame(filename)
+        if M.GitBlameCache[filename] == nil then
+            M.GitBlameCache[filename] = M.git_blame(filename)
         end
-        local blame = GitBlameCache[filename] and GitBlameCache[filename][row] or {}
+        local blame = M.GitBlameCache[filename] and M.GitBlameCache[filename][row] or {}
         table.insert(global_marks, {char, row, filename, blame})
     end
     return global_marks
@@ -88,13 +89,10 @@ end
 function M.scan_vimmarks(target_bufnr)
     local vimmarks = {}
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(target_bufnr), ":.")
-    if GitBlameCache[filename] == nil then
-        GitBlameCache[filename] = M.git_blame(filename)
-    end
     for _, item in ipairs(vim.fn.getmarklist(target_bufnr)) do
         local char = item.mark:sub(2,2)
         local bufnr, row, _, _ = unpack(item.pos)
-        local blame = GitBlameCache[filename] and GitBlameCache[filename][row] or {}
+        local blame = M.GitBlameCache[filename] and M.GitBlameCache[filename][row] or {}
         if char:match('[a-z]') ~= nil then
             table.insert(vimmarks, {char, row, blame})
         end
@@ -109,10 +107,7 @@ function M.scan_notes(bufnr)
     local notes = {}
     local items = vim.api.nvim_buf_get_extmarks(bufnr, M.NS_Notes, 0, -1, {details=true})
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
-    if GitBlameCache[filename] == nil then
-        GitBlameCache[filename] = M.git_blame(filename)
-    end
-    local blame = GitBlameCache[filename] and GitBlameCache[filename][row] or {}
+    local blame = M.GitBlameCache[filename] and M.GitBlameCache[filename][row] or {}
     for _, ext in ipairs(items) do
         -- print('scanned an extmark', vim.inspect(ext))
         local mark_id, row, _, details = unpack(ext)  -- details: vim.api.keyset.set_extmark
@@ -181,7 +176,6 @@ function M.restore_local_marks(bufnr)
     local filename = vim.api.nvim_buf_get_name(bufnr)
     local json_path = M.make_json_path(filename)
     local data = M.load_json(json_path) or {vimmarks={}, notes={}}
-    -- print('restoring from', json_path, vim.inspect(data))
     -- Restore local vimmarks
     for _, item in ipairs(data['vimmarks'] or {}) do
         local char, row, _ = unpack(item)
@@ -190,7 +184,6 @@ function M.restore_local_marks(bufnr)
     -- Restore local notes
     for _, ext in ipairs(data['notes'] or {}) do
         local mark_id, row, virt_lines, _ = unpack(ext)
-        -- print('extracted notes', vim.inspect(ext), virt_lines)
         vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row, 0, {
             id=mark_id,
             end_row=row,
@@ -243,6 +236,27 @@ function M.update_sign_column(bufnr)
 end
 
 
+--- Get all past file names of a given file (by git)
+---
+--- @return string[] # [filename1, filename2...]
+function M.git_rename_history(filename)
+    local cmd = string.format('git log --follow --name-only --format="" %s |uniq', filename)
+    -- print('Executing cmd', vim.inspect(cmd))
+    local obj = vim.system({'sh', '-c', cmd}, {text = true}):wait()
+    if obj.code ~= 0 then
+        --- Files not tracked by git won't return data
+        -- print('Git blame failed: ' .. obj.stderr)
+        return {}
+    end
+    local names = {}
+    local lines = vim.split(obj.stdout, '[\r\n]+')
+    for _, s in ipairs(lines) do
+        if s ~= '' then table.insert(names, vim.trim(s)) end
+    end
+    return names
+end
+
+
 --- Blame whole file, and extract meta info of each line
 ---
 --- @performance 2ms # means no need async for this
@@ -261,7 +275,7 @@ function M.git_blame(filename)
     for i=1, #lines do
         --- e.g., a3672a14        (My Name     1768430769      14)if anything then...
         --- e.g., 00000000        (Not Committed Yet      1768707934      15)local SetupStatusPerBuf = ...
-        line = lines[i]
+        line = vim.trim(lines[i])
         local commit_id, author, timestamp, row, content = line:match("^(%x+)%s+%(%s*(.-)\t+(%d+)\t+(%d+)%)(.*)$")
         if row == nil or content == nil then goto continue end
         -- Find surroundings:
