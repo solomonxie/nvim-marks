@@ -201,7 +201,7 @@ function M.save_all(bufnr)
     local notes = M.scan_notes(bufnr)
     local data = {vimmarks=vimmarks, notes=notes}
     json_path = M.make_json_path(filename)
-    -- print('saving vimmarks/notes to', #vimmarks, #notes, json_path)
+    print('saving vimmarks/notes to', #vimmarks, #notes, json_path)
     if #vimmarks > 0 or #notes > 0 then
         M.save_json(data, json_path)
     else
@@ -214,12 +214,11 @@ function M.restore_global_marks()
     local global_marks = M.load_json(json_path) or {}  --- @type table[] # [{char=a, row=1, filename=abc}, {...}]
     for _, item in ipairs(global_marks) do
         local char, row, filename, blame = unpack(item)
-        -- todo: smart matching
-        -- issue: 1) target filename change; 2) in case of change, how to read whole file to find match
         if vim.g.nvim_marks_restore_global == 1 then
             local bufnr = vim.fn.bufadd(filename)  -- Will not reload existing buffer but return existing id
             vim.fn.bufload(bufnr)
-            vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
+            new_row = M.smart_match(bufnr, row, filename, blame)
+            vim.api.nvim_buf_set_mark(bufnr, char, new_row, 0, {})
         end
     end
 end
@@ -230,11 +229,11 @@ function M.restore_marks(bufnr)
     local data = M.load_json(json_path) or {vimmarks={}, notes={}}
     -- Restore local vimmarks
     for _, item in ipairs(data['vimmarks'] or {}) do
-        local char, old_row, old_filename, old_blame = unpack(item)
-        local row = M.smart_match(bufnr, old_row, old_filename, old_blame)
+        local char, row, _, blame = unpack(item)
+        local new_row = M.smart_match(bufnr, row, filename, blame)
         -- print('Smart matched', old_row, 'vs', row, 'for', old_filename)
-        if row > 0 then
-            vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
+        if new_row > 0 then
+            vim.api.nvim_buf_set_mark(bufnr, char, new_row, 0, {})
         end
     end
     -- Restore local notes
@@ -272,6 +271,8 @@ function M.smart_match(bufnr, old_row, old_filename, old_blame)
         local old_content = old_blame.content or ''
         -- Start to calculate matching score at original row
         local similarity = M.levenshtein_distance(old_content, latest_content)
+        -- print('matching', old_content, latest_content, old_row, similarity)
+        -- print(vim.inspect(old_blame))
         if similarity >= 0.9 then
             return old_row
         end
@@ -302,7 +303,7 @@ function M.smart_match(bufnr, old_row, old_filename, old_blame)
                 best_match = new_row
             end
         end
-
+        -- print('tried rematching got best match', best_similarity, best_match)
         if best_match ~= -1 then
             return best_match
         end
