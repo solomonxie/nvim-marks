@@ -30,7 +30,7 @@ function M.openMarks()
     local filename = vim.api.nvim_buf_get_name(target_bufnr)
     -- Prepare content
     local content_lines = {
-        '> Help: Press `a-Z` Add mark | `+` Add note | `-` Delete  | `*` List all | `q` Quit',
+        '> Help: Press `a` Add mark | `-` Delete | `+` Add note | `q` Quit',
     }
     -- Render marks
     local vimmarks = utils.scan_vimmarks(target_bufnr)
@@ -68,23 +68,36 @@ function M.openMarks()
     -- Create a window and display
     local win_bufnr = M.create_window()
     vim.api.nvim_buf_set_lines(win_bufnr, 0, -1, false, content_lines)
-    vim.cmd('setlocal readonly nomodifiable')
-    vim.cmd('redraw')
-    -- Listen for user's next keystroke
-    -- TODO: allow user to scroll
-    local key = vim.fn.getcharstr()
-    vim.cmd('bwipeout!')  -- Close window no matter what
-    if key == '-' then
-        utils.delete_vimmark(target_bufnr, target_row)
-        utils.delete_note(target_bufnr, target_row)
-    elseif key == "+" then
+    -- Key: Add a mark
+    local opts = { buffer = win_bufnr, silent = true, nowait = true }
+    vim.keymap.set('n', 'a', function()
+        local char = vim.fn.getcharstr()
+        if char:match('[a-zA-Z]') then
+            utils.set_vimmark(target_bufnr, char, target_row)
+            utils.refresh_sign_bar(target_bufnr)
+            vim.cmd('bwipeout!')
+        end
+        vim.api.nvim_echo({{'Added mark: '..char, 'Normal'}}, false, {})
+    end, opts)
+    -- Key: Add a note
+    vim.keymap.set('n', '+', function()
         M.switchEditMode(target_bufnr, target_row)
-    elseif key == 'q' or key == '\3' or key == '\27' then  -- q | <Ctrl-c> | <ESC>
-        -- Do nothing.
-    elseif key:match('[a-zA-Z]') then  -- Any other a-zA-Z letter
-        utils.set_vimmark(target_bufnr, key, target_row)
-    end
-    utils.refresh_sign_bar(target_bufnr)
+    end, opts)
+    -- Key: Delete a mark/note
+    vim.keymap.set('n', '-', function()
+        local char = vim.fn.getcharstr()
+        if char:match('[a-zA-Z]') then
+            vim.api.nvim_buf_del_mark(target_bufnr, char)
+            utils.refresh_sign_bar(target_bufnr)
+        else
+            utils.delete_vimmark(target_bufnr, target_row)
+            utils.delete_note(target_bufnr, target_row)
+            utils.refresh_sign_bar(target_bufnr)
+        end
+        vim.api.nvim_echo({{'Deleted mark: '..char, 'Normal'}}, false, {})
+        vim.cmd('bwipeout!')
+    end, opts)
+    vim.cmd('redraw')
 end
 
 --- @return integer # Mark-window's Buffer id
