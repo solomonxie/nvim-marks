@@ -32,7 +32,8 @@ function M.make_json_path(source_path)
     local proj_root = vim.fs.root(source_path, '.git')
     if not proj_root then proj_root = '/tmp' end
     local proj_name = vim.fn.fnamemodify(proj_root, ':t')
-    local json_path = proj_root .. '/.git/persistent_marks/' .. proj_name .. '/' .. flatten_name .. '.json'
+    local persistent_dir = vim.g.nvim_marks_persistent_dir or (proj_root .. '/.git/persistent_marks')
+    local json_path = persistent_dir .. '/' .. proj_name .. '/' .. flatten_name .. '.json'
     return json_path
 end
 
@@ -166,9 +167,11 @@ function M.restore_global_marks()
         local char, row, filename, blame = unpack(item)
         -- todo: smart matching
         -- issue: 1) target filename change; 2) in case of change, how to read whole file to find match
-        local bufnr = vim.fn.bufadd(filename)  -- Will not reload existing buffer but return existing id
-        vim.fn.bufload(bufnr)
-        vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
+        if vim.g.nvim_marks_restore_global == 1 then
+            local bufnr = vim.fn.bufadd(filename)  -- Will not reload existing buffer but return existing id
+            vim.fn.bufload(bufnr)
+            vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
+        end
     end
 end
 
@@ -256,7 +259,7 @@ function M.git_blame(filename)
     local lines = vim.split(obj.stdout, '[\r\n]+')
     local blames = {}
     for i=1, #lines do
-        --- e.g., a3672a14        (My Name     1768430769      14)
+        --- e.g., a3672a14        (My Name     1768430769      14)if anything then...
         --- e.g., 00000000        (Not Committed Yet      1768707934      15)local SetupStatusPerBuf = ...
         line = lines[i]
         local commit_id, author, timestamp, row, content = line:match("^(%x+)%s+%(%s*(.-)\t+(%d+)\t+(%d+)%)(.*)$")
@@ -276,8 +279,8 @@ function M.git_blame(filename)
         -- print('blamed', filename, line)
         local prev_pos = math.max(1, i-3)
         local next_pos = math.min(#line, i+3)
-        local prev = vim.list_slice(lines, prev_pos, i)
-        local next = vim.list_slice(lines, i, next_pos)
+        local prev = table.concat(vim.list_slice(lines, prev_pos, i), '\n')
+        local next = table.concat(vim.list_slice(lines, i, next_pos), '\n')
         local percentile = math.floor((row / #lines) * 100) -- Rough positions (1-100%)
         local info = {
             commit_id = commit_id,
@@ -294,6 +297,33 @@ function M.git_blame(filename)
         ::continue::
     end
     return blames
+end
+
+--- Levenshtein Distance: calculate similarity between two strings
+--- It will check how many characters to change in order to get from str1->str2
+--- e.g., 'haha' & 'haha' -> 100; 'haha'&'hiha' -> 75; 'haha'&'lol'->0
+---
+--- @reference https://en.wikipedia.org/wiki/Levenshtein_distance
+--- @return integer # 0-100%. 100 - identical; 0 - completely different
+function M.levenshtein_distance(str1, str2)
+    if str1 == str2 then return 100 end
+    if #str1 == 0 or #str2 == 0 then return 0 end
+    local v0 = {}
+    for i = 0, #str2 do v0[i] = i end
+    for i = 1, #str1 do
+        local v1 = { [0] = i }
+        for j = 1, #str2 do
+            local cost = (str1:sub(i, i) == str2:sub(j, j)) and 0 or 1
+            v1[j] = math.min(v1[j - 1] + 1, v0[j] + 1, v0[j - 1] + cost)
+        end
+        v0 = v1
+    end
+    local distance = v0[#str2]
+    -- Normalize to 100%:
+    local max_len = math.max(#str1, #str2)
+    if max_len == 0 then return 100 end
+    local similarity = (1 - (distance / max_len)) * 100
+    return similarity
 end
 
 

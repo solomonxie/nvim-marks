@@ -1,5 +1,7 @@
 " Options:
-let g:restore_global_marks = 1  "At vim start, this will restore global marks for unopened files, which may trigger some BufEnter actions
+let g:nvim_marks_restore_global = 1  "At vim start, this will restore global marks for unopened files, which may trigger some BufEnter actions
+
+" let g:persistent_dir = expand('~/Documents/nvim-marks')
 
 " Keymaps:
 map m <C-m>
