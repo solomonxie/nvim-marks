@@ -13,7 +13,6 @@ local M = {}
 local utils = require('nvim-marks.utils')
 
 local IsBufferSetup = {}
-local GitBlamePerBuf = {}
 
 
 --- Swith to note editing mode allows user to type notes
@@ -130,10 +129,8 @@ end
 
 --- Save global vimmarks and local vimmarks+notes
 function M.save_all(bufnr)
+    utils.update_git_blame_cache()  -- Update latest blames before saving (could be changed by external editors)
     local filename = vim.api.nvim_buf_get_name(bufnr)
-    if utils.BlameCache[filename] == nil then
-        utils.BlameCache[filename] = M.git_blame(filename)
-    end
     -- Save global vimmarks
     local global_marks = utils.scan_global_vimmarks()
     local json_path = utils.make_json_path('vimmarks_global')
@@ -161,10 +158,8 @@ function M.setupBuffer()
     local is_file = utils.is_real_file(bufnr)
     if not is_file then return end
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
-    if GitBlamePerBuf[bufnr] == nil then GitBlamePerBuf[bufnr] = {} end
     if IsBufferSetup[bufnr] == nil then
-        utils.BlameCache[filename] = utils.git_blame(filename)
-        utils.RenameHistory[filename] = utils.git_rename_history(filename)
+        utils.update_git_blame_cache()
         utils.restore_global_marks()
         utils.restore_marks(bufnr)
         utils.refresh_sign_bar(bufnr)

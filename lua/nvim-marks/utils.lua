@@ -62,7 +62,30 @@ function M.load_json(json_path)
     if not f then return nil end
     local content = f:read("*all")
     f:close()
-    return vim.json.decode(content) or {}
+    content = vim.trim(content)
+    if content ~= '' then
+        return vim.json.decode(content) or {}
+    end
+    return {}
+end
+
+
+function M.update_git_blame_cache()
+    -- Scan all filenames
+    local marked_files = {}  --- @type table # {filename=true}
+    local json_path = M.make_json_path('vimmarks_global')
+    for _, item in ipairs(M.load_json(json_path) or {}) do
+        local _, _, filename, _, _ = unpack(item)
+        if filename ~= nil then marked_files[filename] = true end
+    end
+
+    -- todo
+    for _, filename in ipairs(marked_files) do
+        -- Git blames
+        M.BlameCache[filename] = M.git_blame(filename)
+        -- Git rename history
+        M.RenameHistory[filename] = M.git_rename_history(filename)
+    end
 end
 
 --- Get global vimmarks only
@@ -74,16 +97,8 @@ function M.scan_global_vimmarks()
         local char = item.mark:sub(2,2)
         local bufnr, row, _, _ = unpack(item.pos)
         local filename = vim.fn.fnamemodify(item.file, ":.")
-        local renames = RenameHistory[filename]
-        if renames == nil then RenameHistory[filename] = M.git_rename_history(filename) end
-        for _, fn in ipair(renames) do
-            if M.BlameCache[fn] == nil then M.BlameCache[fn] = M.git_blame(fn) end
-            if M.BlameCache[fn] ~= nil and M.BlameCache[fn][row] ~! nil then
-                local blame = M.BlameCache[fn][row]
-                table.insert(global_marks, {char, row, fn, blame})
-            end
-        end
-
+        local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
+        table.insert(global_marks, {char, row, filename, blame})
     end
     return global_marks
 end
@@ -99,7 +114,7 @@ function M.scan_vimmarks(target_bufnr)
         local bufnr, row, _, _ = unpack(item.pos)
         local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
         if char:match('[a-z]') ~= nil then
-            table.insert(vimmarks, {char, row, blame})
+            table.insert(vimmarks, {char, row, filename, blame})
         end
     end
     return vimmarks
@@ -112,10 +127,10 @@ function M.scan_notes(bufnr)
     local notes = {}
     local items = vim.api.nvim_buf_get_extmarks(bufnr, M.NS_Notes, 0, -1, {details=true})
     local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
-    local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
     for _, ext in ipairs(items) do
         local mark_id, row, _, details = unpack(ext)  -- details: vim.api.keyset.set_extmark
-        table.insert(notes, {mark_id, row+1, details.virt_lines, blame})
+        local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
+        table.insert(notes, {mark_id, row+1, filename, details.virt_lines, blame})
     end
     return notes
 end
@@ -151,7 +166,7 @@ end
 function M.delete_note(target_bufnr, target_row)
     local notes = M.scan_notes(target_bufnr)
     for _, item in ipairs(notes) do
-        local mark_id, row, _, _ = unpack(item)
+        local mark_id, row, _, _, _, _ = unpack(item)
         if row == target_row then
             vim.api.nvim_buf_del_extmark(target_bufnr, M.NS_Notes, mark_id)
         end
@@ -182,7 +197,7 @@ function M.restore_marks(bufnr)
     local data = M.load_json(json_path) or {vimmarks={}, notes={}}
     -- Restore local vimmarks
     for _, item in ipairs(data['vimmarks'] or {}) do
-        local char, row, _ = unpack(item)
+        local char, row, _, _ = unpack(item)
         vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
     end
     -- Restore local notes
@@ -209,7 +224,7 @@ function M.refresh_sign_bar(bufnr)
     vim.api.nvim_buf_clear_namespace(bufnr, M.NS_Signs, 0, -1)  -- Delete all signs then add each
     -- Local signs
     for _, item in ipairs(vimmarks) do
-        local char, row, _ = unpack(item)
+        local char, row, _, _ = unpack(item)
         vim.api.nvim_buf_set_extmark(bufnr, M.NS_Signs, row-1, 0, {
             id=math.random(1000, 9999),
             end_row=row-1,  -- extmark is 0-indexed

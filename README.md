@@ -13,6 +13,7 @@ Persistent marks and annotations for Neovim that survive code changes, branch sw
 - [x] **Dual Support**: Works with both Vim marks (a-z, A-Z) and Extmarks for annotations
 - [x] **Visual Indicators**: Sign column shows all marks and notes at a glance
 - [x] **Automatic**: Save/restore marks automatically on buffer events
+- [ ] Smart match each mark on restoring each buffer
 - [ ] Match marks after file renamed
 
 
