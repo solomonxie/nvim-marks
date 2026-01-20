@@ -27,7 +27,7 @@ end
 function M.openMarks()
     local target_bufnr = vim.api.nvim_get_current_buf()
     local target_row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
-    local filename = vim.api.nvim_buf_get_name(target_bufnr)
+    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(target_bufnr), ":.")
     -- Prepare content
     local content_lines = {
         '> Help: Press `a` Add mark | `-` Delete | `+` Add note | `q` Quit',
@@ -57,7 +57,7 @@ function M.openMarks()
         table.insert(content_lines, '# Notes')
     end
     for _, item in ipairs(notes) do
-        local _, row, virt_lines = unpack(item)
+        local _, row, _, virt_lines, _ = unpack(item)
         local preview = ''
         if virt_lines and virt_lines[1] and virt_lines[1][1] then
             preview = '>> ' .. virt_lines[1][1][1]:sub(1, 30) .. '...'
@@ -152,7 +152,7 @@ function M.setupBuffer()
         utils.restore_marks(bufnr)
         utils.refresh_sign_bar(bufnr)
         -- Register auto saving/updating logic
-        vim.api.nvim_create_autocmd('BufHidden', {  -- BufHidden include BufLeave/BufWinLeave
+        vim.api.nvim_create_autocmd({'BufLeave', 'VimLeave'}, {  -- Don't register too many, may trigger n times
             buffer = bufnr,
             callback = function() utils.save_all(bufnr) end,
         })
