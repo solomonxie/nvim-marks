@@ -90,7 +90,6 @@ function M.update_git_blame_cache()
             if filename ~= nil then marked_files[filename] = true end
         end
     end
-    -- todo
     for filename, _ in pairs(marked_files) do
         -- Git blames
         M.BlameCache[filename] = M.git_blame(filename)
@@ -226,8 +225,6 @@ function M.restore_global_marks()
 end
 
 function M.restore_marks(bufnr)
-    -- todo: smart matching
-    -- issue: 1) target filename change; 2) in case of change, how to read whole file to find match
     local filename = vim.api.nvim_buf_get_name(bufnr)
     local json_path = M.make_json_path(filename)
     local data = M.load_json(json_path) or {vimmarks={}, notes={}}
@@ -397,7 +394,7 @@ function M.git_blame(filename)
         local line_str = vim.trim(lines[i])
         local commit_id, author, timestamp, row_str, content = line_str:match("^(%x+)%s+%(%s*(.-)\t+(%d+)\t+(%d+)%)(.*)$")
         if row_str == nil or content == nil then goto continue end
-        local row = tonumber(row_str)
+        local row = tonumber(row_str) or -1
         local prev_pos = math.max(1, i-3)
         local next_pos = math.min(#lines, i+3)
         local prev_lines = {}
