@@ -208,8 +208,8 @@ function M.restore_marks(bufnr)
     local data = M.load_json(json_path) or {vimmarks={}, notes={}}
     -- Restore local vimmarks
     for _, item in ipairs(data['vimmarks'] or {}) do
-        local char, row, old_filename, old_blame = unpack(item)
-        -- local row = M.match_mark(old_filename, old_blame)
+        local char, old_row, old_filename, old_blame = unpack(item)
+        local row = M.smart_match(bufnr, old_row, old_filename, old_blame)
         vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
     end
     -- Restore local notes
@@ -231,8 +231,37 @@ end
 --- Smart matching
 ---
 --- @return integer # matched latest row number of given info (-1 > no any confident matching found)
-function match_mark(old_row, old_filename, old_blame)
-    local renames = RenameHistory[old_filename]
+function smart_match(bufnr, old_row, old_filename, old_blame)
+    local renames = RenameHistory[old_filename] or {}
+    for _, filename in ipairs(renames) do
+        local latest_blame = BlameCache[filename] and BlameCache[filename][old_row] or {}
+        local latest_content = latest_blame.content or ''
+        local old_content = old_blame.content or ''
+        print('Found the latest blame of row', old_row, latest_content, old_content)
+        -- Start to calculate matching score
+        local similarity = M.levenshtein_distance(old_blame.content, latest_blame.content)
+        if similarity >= 90 then
+            return old_row
+        end
+        -- Find a best match by iterating comparing every line
+        local best_match = -1
+        local best_similarity = -1
+        local total_lines = vim.api.nvim_buf_line_count(bufnr)
+        for new_row=1, total_lines do
+            local new_blame = BlameCache[filename] and BlameCache[filename][new_row] or {}
+            local content_similarity = M.levenshtein_distance(old_content, new_blame.content)
+            local row_similarity = (1- (math.abs(old_row - new_row)/total_lines)) * 100
+            local percentile_similarity = (1- (math.abs(old_blame.percentile - new_blame.percentile)/100)) * 100
+            local prev_similarity = M.levenshtein_distance(old_blame.prev, new_blame.prev)
+            local next_similarity = M.levenshtein_distance(old_blame.next, new_blame.next)
+            -- calculate similarity score
+            local overall_similarity = (content_similarity + row_similarity + percentile_similarity + prev_similarity + next_similarity)/500 *100
+            if overall_similarity > 90 and overall_similarity > best_similarity then
+                best_match = new_row
+            end
+        end
+        return new_row
+    end
     return -1
 end
 
