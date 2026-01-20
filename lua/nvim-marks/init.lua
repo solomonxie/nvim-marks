@@ -130,6 +130,7 @@ end
 --- Save global vimmarks and local vimmarks+notes
 function M.save_all(bufnr)
     utils.update_git_blame_cache()  -- Update latest blames before saving (could be changed by external editors)
+    print('saving all for', bufnr)
     local filename = vim.api.nvim_buf_get_name(bufnr)
     -- Save global vimmarks
     local global_marks = utils.scan_global_vimmarks()
@@ -164,7 +165,7 @@ function M.setupBuffer()
         utils.restore_marks(bufnr)
         utils.refresh_sign_bar(bufnr)
         -- Register auto saving/updating logic
-        vim.api.nvim_create_autocmd({'BufLeave', 'BufWinLeave', 'BufHidden'}, {
+        vim.api.nvim_create_autocmd('BufHidden', {  -- BufHidden include BufLeave/BufWinLeave
             buffer = bufnr,
             callback = function() M.save_all(bufnr) end,
         })

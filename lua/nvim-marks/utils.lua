@@ -71,16 +71,27 @@ end
 
 
 function M.update_git_blame_cache()
-    -- Scan all filenames
+    -- Scan files in global marks
     local marked_files = {}  --- @type table # {filename=true}
     local json_path = M.make_json_path('vimmarks_global')
     for _, item in ipairs(M.load_json(json_path) or {}) do
-        local _, _, filename, _, _ = unpack(item)
+        local _, _, filename, _ = unpack(item)
         if filename ~= nil then marked_files[filename] = true end
     end
-
+    -- Scan files in each local mark file
+    for path, _ in vim.fs.dir(json_path) do
+        local data = M.load_json(json_path) or {vimmarks={}, notes={}}
+        for _, item in data['vimmarks'] do
+            local _, _, filename, _ = unpack(item)
+            if filename ~= nil then marked_files[filename] = true end
+        end
+        for _, item in data['notes'] do
+            local _, _, filename, _, _ = unpack(item)
+            if filename ~= nil then marked_files[filename] = true end
+        end
+    end
     -- todo
-    for _, filename in ipairs(marked_files) do
+    for filename, _ in pairs(marked_files) do
         -- Git blames
         M.BlameCache[filename] = M.git_blame(filename)
         -- Git rename history
@@ -197,7 +208,8 @@ function M.restore_marks(bufnr)
     local data = M.load_json(json_path) or {vimmarks={}, notes={}}
     -- Restore local vimmarks
     for _, item in ipairs(data['vimmarks'] or {}) do
-        local char, row, _, _ = unpack(item)
+        local char, row, old_filename, old_blame = unpack(item)
+        -- local row = M.match_mark(old_filename, old_blame)
         vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
     end
     -- Restore local notes
@@ -213,6 +225,15 @@ function M.restore_marks(bufnr)
             virt_lines=virt_lines,
         })
     end
+end
+
+
+--- Smart matching
+---
+--- @return integer # matched latest row number of given info (-1 > no any confident matching found)
+function match_mark(old_row, old_filename, old_blame)
+    local renames = RenameHistory[old_filename]
+    return -1
 end
 
 
