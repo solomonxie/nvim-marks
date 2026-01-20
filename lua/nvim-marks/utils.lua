@@ -202,7 +202,7 @@ function M.restore_marks(bufnr)
     end
     -- Restore local notes
     for _, ext in ipairs(data['notes'] or {}) do
-        local mark_id, row, virt_lines, _ = unpack(ext)
+        local mark_id, row, _, virt_lines, _ = unpack(ext)
         vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row, 0, {
             id=mark_id,
             end_row=row,
