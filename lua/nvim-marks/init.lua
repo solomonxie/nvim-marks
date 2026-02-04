@@ -33,6 +33,7 @@ function M.openMarks()
         '> Help: Press `a` Add mark | `-` Delete | `+` Add note | `q` Quit',
     }
     -- Render marks
+    local marks_metadata = {}
     local vimmarks = utils.scan_vimmarks(target_bufnr)
     if #vimmarks > 0 then
         table.insert(content_lines, '')
@@ -42,6 +43,7 @@ function M.openMarks()
         local char, row = unpack(item)
         local display = string.format("(%s) %s:%d", char, filename, row)
         table.insert(content_lines, display)
+        marks_metadata[#content_lines] = { type = 'mark', char = char, row = row, filename = filename }
     end
     -- Render global marks
     local global_marks = utils.scan_global_vimmarks()
@@ -49,6 +51,7 @@ function M.openMarks()
         local char, row, global_filename = unpack(item)
         local display = string.format("(%s) %s:%d", char, global_filename, row)
         table.insert(content_lines, display)
+        marks_metadata[#content_lines] = { type = 'global', char = char, row = row, filename = global_filename }
     end
     -- Render notes
     local notes = utils.scan_notes(target_bufnr)
@@ -57,47 +60,72 @@ function M.openMarks()
         table.insert(content_lines, '# Notes')
     end
     for _, item in ipairs(notes) do
-        local _, row, _, virt_lines, _ = unpack(item)
+        local id, row, _, virt_lines, _ = unpack(item)
         local preview = ''
         if virt_lines and virt_lines[1] and virt_lines[1][1] then
             preview = '>> ' .. virt_lines[1][1][1]:sub(1, 30) .. '...'
         end
         local display = string.format("* %s:%d %s", filename, row, preview)
         table.insert(content_lines, display)
+        marks_metadata[#content_lines] = { type = 'note', id = id, row = row, filename = filename }
     end
     -- Create a window and display
     local win_bufnr = M.create_window()
+    vim.b.marks_metadata = marks_metadata
     vim.api.nvim_buf_set_lines(win_bufnr, 0, -1, false, content_lines)
-    -- Key: Add a mark
-    local opts = { buffer = win_bufnr, silent = true, nowait = true }
-    vim.keymap.set('n', 'a', function()
-        local char = vim.fn.getcharstr()
-        if char:match('[a-zA-Z]') then
-            utils.set_vimmark(target_bufnr, char, target_row)
-            utils.refresh_sign_bar(target_bufnr)
+    vim.cmd('setlocal nomodifiable')
+    -- Key: Jump to mark/note
+    vim.keymap.set('n', '<CR>', function()
+        local mark = M.get_mark_at_cursor()
+        if mark then
             vim.cmd('bwipeout!')
+            if mark.type == 'global' then
+                vim.cmd('edit ' .. mark.filename)
+                vim.api.nvim_win_set_cursor(0, {mark.row, 0})
+            else
+                vim.api.nvim_set_current_buf(target_bufnr)
+                vim.api.nvim_win_set_cursor(0, {mark.row, 0})
+            end
         end
-        vim.api.nvim_echo({{'Added mark: '..char, 'Normal'}}, false, {})
-    end, opts)
-    -- Key: Add a note
-    vim.keymap.set('n', '+', function()
-        M.switchEditMode(target_bufnr, target_row)
     end, opts)
     -- Key: Delete a mark/note
     vim.keymap.set('n', '-', function()
-        local char = vim.fn.getcharstr()
-        if char:match('[a-zA-Z]') then
-            vim.api.nvim_buf_del_mark(target_bufnr, char)
-            utils.refresh_sign_bar(target_bufnr)
+        local mark = M.get_mark_at_cursor()
+        if mark then
+            if mark.type == 'global' or mark.type == 'mark' then
+                local bufnr = mark.type == 'global' and vim.fn.bufadd(mark.filename) or target_bufnr
+                vim.api.nvim_buf_del_mark(bufnr, mark.char)
+                utils.refresh_sign_bar(bufnr)
+            elseif mark.type == 'note' then
+                vim.api.nvim_buf_del_extmark(target_bufnr, utils.NS_Notes, mark.id)
+                utils.refresh_sign_bar(target_bufnr)
+            end
+            vim.cmd('bwipeout!')
+            vim.api.nvim_echo({{'Deleted ' .. mark.type .. ': ' .. (mark.char or mark.id), 'Normal'}}, false, {})
         else
-            utils.delete_vimmark(target_bufnr, target_row)
-            utils.delete_note(target_bufnr, target_row)
-            utils.refresh_sign_bar(target_bufnr)
+            -- Fallback to original behavior: prompt for char or delete at original row
+            local char = vim.fn.getcharstr()
+            if char:match('[a-zA-Z]') then
+                vim.api.nvim_buf_del_mark(target_bufnr, char)
+                utils.refresh_sign_bar(target_bufnr)
+            else
+                utils.delete_vimmark(target_bufnr, target_row)
+                utils.delete_note(target_bufnr, target_row)
+                utils.refresh_sign_bar(target_bufnr)
+            end
+            vim.api.nvim_echo({{'Deleted marks/notes at line ' .. target_row, 'Normal'}}, false, {})
+            vim.cmd('bwipeout!')
         end
-        vim.api.nvim_echo({{'Deleted mark: '..char, 'Normal'}}, false, {})
-        vim.cmd('bwipeout!')
     end, opts)
     vim.cmd('redraw')
+end
+
+--- Get mark info at current cursor line using metadata stored in buffer
+--- @return table|nil # {type='mark'|'note'|'global', char=string, id=number, row=number, filename=string}
+function M.get_mark_at_cursor()
+    local row, _ = unpack(vim.api.nvim_win_get_cursor(0))
+    local metadata = vim.b.marks_metadata or {}
+    return metadata[row]
 end
 
 --- @return integer # Mark-window's Buffer id
