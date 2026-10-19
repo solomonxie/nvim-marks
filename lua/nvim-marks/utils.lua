@@ -1,9 +1,14 @@
 local M = {}
 
+local anchor = require('nvim-marks.anchor')
+local store = require('nvim-marks.store')
+
 M.NS_Signs = vim.api.nvim_create_namespace('nvim-marks.signs')
 M.NS_Notes = vim.api.nvim_create_namespace('nvim-marks.notes')
-M.BlameCache = {}  --- @type table{string, table}  # {filename={blame_tuple}}
-M.RenameHistory = {}  --- @type table{string, table}  # {filename={name1, name2}}
+M.NoteTexts = {}  --- @type table<integer, table<integer, string[]>> # {bufnr={mark_id=lines}}
+M.note_style = vim.g.nvim_marks_note_style or 'inline'  --- @type 'inline'|'above' # set by setup()
+M.note_prefix = '    -- '  --- @type string # before an inline note
+M.Orphans = {}  --- @type table<integer, table[]> # {bufnr={orphan}}, marks/notes not found in the buffer's current version
 
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
@@ -22,127 +27,91 @@ function M.is_real_file(bufnr)
     return vim.fn.filereadable(path) == 1
 end
 
---- Marks go with project, better to be saved under project folder
---- Each file has its own persistent-marks file, just like vim `undofile`
---- TODO: accept customization of main folder instead of `.git/`
+--- @return string, table, string # absolute path (symlinks resolved), repo info, store file
+local function locate_store(bufnr)
+    local path = vim.fn.resolve(vim.api.nvim_buf_get_name(bufnr))
+    local info = store.repo_info(path)
+    return path, info, store.store_path(info)
+end
+
+--- Get global vimmarks (A-Z) only
 ---
---- @param source_path string # target buffer's file full path
---- @return string # converted final json path for the persistent marks
-function M.make_json_path(source_path)
-    local flatten_name = vim.fn.fnamemodify(source_path, ':.'):gsub('/', '__'):gsub('\\', '__')
-    local proj_root = vim.fs.root(source_path, '.git')
-    if not proj_root then proj_root = '/tmp' end
-    local proj_name = vim.fn.fnamemodify(proj_root, ':t')
-    local persistent_dir = vim.g.nvim_marks_persistent_dir or (proj_root .. '/.git/persistent_marks')
-    local json_path = persistent_dir .. '/' .. proj_name .. '/' .. flatten_name .. '.json'
-    return json_path
-end
-
---- @param data table
-function M.save_json(data, json_path)
-    local json_data = vim.fn.json_encode(data)
-    -- Create folder if not exist
-    local target_dir = vim.fn.fnamemodify(json_path, ':p:h')
-    if vim.fn.isdirectory(target_dir) == 0 then
-        vim.fn.mkdir(target_dir, 'p')
-    end
-    local f = io.open(json_path, 'w')
-    if f then
-        f:write(json_data)
-        f:close()
-    else
-        print('Failed to write data to', json_path)
-    end
-end
-
---- @param json_path string
---- @return table|nil
-function M.load_json(json_path)
-    local f = io.open(json_path, 'r')
-    if not f then return nil end
-    local content = f:read("*all")
-    f:close()
-    content = vim.trim(content)
-    if content ~= '' then
-        return vim.json.decode(content) or {}
-    end
-    return {}
-end
-
-
-function M.update_git_blame_cache()
-    -- Scan files in global marks
-    local marked_files = {}  --- @type table # {filename=true}
-    local json_path = M.make_json_path('vimmarks_global')
-    for _, item in ipairs(M.load_json(json_path) or {}) do
-        local _, _, filename, _ = unpack(item)
-        if filename ~= nil then marked_files[filename] = true end
-    end
-    -- Scan files in each local mark file
-    for path, _ in vim.fs.dir(json_path) do
-        local data = M.load_json(json_path) or {vimmarks={}, notes={}}
-        for _, item in ipairs(data['vimmarks'] or {}) do
-            local _, _, filename, _ = unpack(item)
-            if filename ~= nil then marked_files[filename] = true end
-        end
-        for _, item in ipairs(data['notes'] or {}) do
-            local _, _, filename, _, _ = unpack(item)
-            if filename ~= nil then marked_files[filename] = true end
-        end
-    end
-    for filename, _ in pairs(marked_files) do
-        -- Git blames
-        M.BlameCache[filename] = M.git_blame(filename)
-        -- Git rename history
-        M.RenameHistory[filename] = M.git_rename_history(filename)
-    end
-end
-
---- Get global vimmarks only
----
---- @return table[] # list of vimmark details [{char, row, filename, details}, {...}]
+--- @return table[] # list of vimmark details [{char, row, filename}, {...}]
 function M.scan_global_vimmarks()
     local global_marks = {}
     for _, item in ipairs(vim.fn.getmarklist()) do
         local char = item.mark:sub(2,2)
-        local bufnr, row, _, _ = unpack(item.pos)
-        local filename = vim.fn.fnamemodify(item.file, ":.")
-        local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
-        table.insert(global_marks, {char, row, filename, blame})
+        local _, row, _, _ = unpack(item.pos)
+        if char:match('[A-Z]') ~= nil then
+            table.insert(global_marks, {char, row, vim.fn.fnamemodify(item.file, ':.')})
+        end
     end
     return global_marks
 end
 
---- Get local vimmarks only
+--- Get local vimmarks (a-z) only
 ---
---- @return table[] # list of vimmark details [{char, row, details}, {...}]
+--- @return table[] # list of vimmark details [{char, row}, {...}]
 function M.scan_vimmarks(target_bufnr)
     local vimmarks = {}
-    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(target_bufnr), ":.")
     for _, item in ipairs(vim.fn.getmarklist(target_bufnr)) do
         local char = item.mark:sub(2,2)
-        local bufnr, row, _, _ = unpack(item.pos)
-        local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
+        local _, row, _, _ = unpack(item.pos)
         if char:match('[a-z]') ~= nil then
-            table.insert(vimmarks, {char, row, filename, blame})
+            table.insert(vimmarks, {char, row})
         end
     end
     return vimmarks
 end
 
+--- Get the A-Z marks placed in this buffer
+---
+--- @return table[] # [{char, row}, {...}]
+local function scan_buffer_global_marks(bufnr)
+    local path = vim.fn.resolve(vim.api.nvim_buf_get_name(bufnr))
+    local marks = {}
+    for _, item in ipairs(vim.fn.getmarklist()) do
+        local char = item.mark:sub(2,2)
+        if char:match('[A-Z]') ~= nil and vim.fn.resolve(vim.fn.fnamemodify(item.file, ':p')) == path then
+            table.insert(marks, {char, item.pos[2]})
+        end
+    end
+    return marks
+end
+
 --- Get notes(extmarks) from given buffer
 ---
---- @return table[] # list of extmark details [{mark_id, row, lines}, {...}]
+--- @return table[] # list of extmark details [{mark_id, row, text}, {...}]
 function M.scan_notes(bufnr)
     local notes = {}
-    local items = vim.api.nvim_buf_get_extmarks(bufnr, M.NS_Notes, 0, -1, {details=true})
-    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
+    local items = vim.api.nvim_buf_get_extmarks(bufnr, M.NS_Notes, 0, -1, {})
     for _, ext in ipairs(items) do
-        local mark_id, row, _, details = unpack(ext)  -- details: vim.api.keyset.set_extmark
-        local blame = M.BlameCache[filename] and M.BlameCache[filename][row] or {}
-        table.insert(notes, {mark_id, row+1, filename, details.virt_lines, blame})
+        local mark_id, row, _ = unpack(ext)
+        local text = (M.NoteTexts[bufnr] or {})[mark_id] or {}
+        table.insert(notes, {mark_id, row+1, text})
     end
     return notes
+end
+
+--- Create a note extmark
+--- 'inline' (default): at the end of the line as `-- note`, lines of a multi-line note joined with ` | `
+--- 'above': as its own lines above the line
+---
+--- @param row integer # 1-indexed
+function M.set_note(bufnr, row, text)
+    local opts = {sign_text='*', sign_hl_group='Comment'}
+    if M.note_style == 'above' then
+        opts.virt_lines_above = true
+        opts.virt_lines = vim.tbl_map(function(line) return {{line, 'Comment'}} end, text)
+    else
+        opts.virt_text = {{M.note_prefix .. table.concat(text, ' | '), 'Comment'}}
+        opts.virt_text_pos = 'eol'
+    end
+    local mark_id = vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row-1, 0, opts)  -- extmark is 0-indexed
+    -- Shown text is joined for display, keep the original lines for saving and editing
+    M.NoteTexts[bufnr] = M.NoteTexts[bufnr] or {}
+    M.NoteTexts[bufnr][mark_id] = text
+    return mark_id
 end
 
 --- Scan multiple vimmarks on a given row
@@ -164,6 +133,8 @@ end
 --- Create a vimmark
 function M.set_vimmark(bufnr, char, row)
     vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
+    -- A mark set again replaces its orphan
+    M.Orphans[bufnr] = vim.tbl_filter(function(o) return o.char ~= char end, M.Orphans[bufnr] or {})
 end
 
 function M.delete_vimmark(bufnr, row)
@@ -176,144 +147,115 @@ end
 function M.delete_note(target_bufnr, target_row)
     local notes = M.scan_notes(target_bufnr)
     for _, item in ipairs(notes) do
-        local mark_id, row, _, _, _, _ = unpack(item)
+        local mark_id, row, _ = unpack(item)
         if row == target_row then
             vim.api.nvim_buf_del_extmark(target_bufnr, M.NS_Notes, mark_id)
         end
     end
 end
 
---- Save global vimmarks and local vimmarks+notes
+function M.delete_orphan(bufnr, index)
+    table.remove(M.Orphans[bufnr] or {}, index)
+end
+
+--- Save this buffer's marks+notes into the repo's store, leaving other files' entries alone
 function M.save_all(bufnr)
-    M.update_git_blame_cache()  -- Update latest blames before saving (could be changed by external editors)
-    local filename = vim.api.nvim_buf_get_name(bufnr)
-    if bufnr == nil then return end
-    -- Save local vimmarks+notes
-    local vimmarks = M.scan_vimmarks(bufnr)
-    local notes = M.scan_notes(bufnr)
-    json_path = M.make_json_path(filename)
-    -- print('saving vimmarks/notes to', #vimmarks, #notes, json_path)
-    if #vimmarks > 0 or #notes > 0 then
-        local data = {vimmarks=vimmarks, notes=notes}
-        M.save_json(data, json_path)
-    else
-        os.remove(json_path) -- Delete empty files if no marks at all
+    if not M.is_real_file(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) then return end
+    local path, info, store_path = locate_store(bufnr)
+    local key = store.file_key(path, info)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local entry = {snapshot=lines, marks={}, notes={}, orphans=M.Orphans[bufnr] or {}}
+    for _, item in ipairs(M.scan_vimmarks(bufnr)) do
+        local char, row = unpack(item)
+        table.insert(entry.marks, {char=char, anchor=anchor.make(lines, row)})
     end
-    -- Save global vimmarks
-    local global_marks = M.scan_global_vimmarks()
-    local json_path = M.make_json_path('vimmarks_global')
-    if #global_marks > 0 then
-        M.save_json(global_marks, json_path)
-    else
-        os.remove(json_path)
+    for _, item in ipairs(scan_buffer_global_marks(bufnr)) do
+        local char, row = unpack(item)
+        table.insert(entry.marks, {char=char, anchor=anchor.make(lines, row)})
     end
+    for _, item in ipairs(M.scan_notes(bufnr)) do
+        local _, row, text = unpack(item)
+        table.insert(entry.notes, {text=text, anchor=anchor.make(lines, row)})
+    end
+    -- Re-read right before writing, another nvim (e.g. in another worktree) may have saved meanwhile
+    local data = store.load(store_path)
+    if #entry.marks + #entry.notes + #entry.orphans > 0 then
+        data.files[key] = entry
+    elseif data.files[key] == nil then
+        return
+    else
+        data.files[key] = nil
+    end
+    store.save(store_path, data)
 end
 
-function M.restore_global_marks()
-    local json_path = M.make_json_path('vimmarks_global')
-    local global_marks = M.load_json(json_path) or {}  --- @type table[] # [{char=a, row=1, filename=abc}, {...}]
-    for _, item in ipairs(global_marks) do
-        local char, row, filename, blame = unpack(item)
-        if vim.g.nvim_marks_restore_global == 1 then
-            local bufnr = vim.fn.bufadd(filename)  -- Will not reload existing buffer but return existing id
-            vim.fn.bufload(bufnr)
-            new_row = M.smart_match(bufnr, row, filename, blame)
-            vim.api.nvim_buf_set_mark(bufnr, char, new_row, 0, {})
-        end
-    end
-end
-
+--- Restore marks+notes of a buffer from the repo's store
 function M.restore_marks(bufnr)
-    local filename = vim.api.nvim_buf_get_name(bufnr)
-    local json_path = M.make_json_path(filename)
-    local data = M.load_json(json_path) or {vimmarks={}, notes={}}
-    -- Restore local vimmarks
-    for _, item in ipairs(data['vimmarks'] or {}) do
-        local char, row, _, blame = unpack(item)
-        local new_row = M.smart_match(bufnr, row, filename, blame)
-        -- print('Smart matched', old_row, 'vs', row, 'for', old_filename)
-        if new_row > 0 then
-            vim.api.nvim_buf_set_mark(bufnr, char, new_row, 0, {})
+    local path, info, store_path = locate_store(bufnr)
+    local key = store.file_key(path, info)
+    local entry = store.load(store_path).files[key]
+    -- Start clean, `:e!` can keep some old note extmarks
+    vim.api.nvim_buf_clear_namespace(bufnr, M.NS_Notes, 0, -1)
+    M.NoteTexts[bufnr] = {}
+    if entry == nil then
+        local legacy = store.load_legacy(info, key)
+        if legacy == nil then return end
+        -- Old version saved rows only: restore at those rows as they are
+        for _, mark in ipairs(legacy.marks) do pcall(M.set_vimmark, bufnr, mark.char, mark.row) end
+        for _, note in ipairs(legacy.notes) do pcall(M.set_note, bufnr, note.row, note.text) end
+        return
+    end
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local hunks = entry.snapshot and anchor.diff(entry.snapshot, lines) or nil
+    local orphans = {}
+    local function restore(item, place)
+        local row = anchor.locate(item.anchor, lines, hunks)
+        if row then
+            place(row)
+        else
+            table.insert(orphans, item)
         end
     end
-    -- Restore local notes
-    for _, ext in ipairs(data['notes'] or {}) do
-        local mark_id, row, _, virt_lines, _ = unpack(ext)
-        vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row, 0, {
-            id=mark_id,
-            end_row=row,
-            end_col=0,
-            sign_text='*',
-            sign_hl_group='Comment',
-            virt_lines_above=true,
-            virt_lines=virt_lines,
-        })
+    for _, mark in ipairs(entry.marks or {}) do
+        restore(mark, function(row) vim.api.nvim_buf_set_mark(bufnr, mark.char, row, 0, {}) end)
     end
+    for _, note in ipairs(entry.notes or {}) do
+        restore(note, function(row) M.set_note(bufnr, row, note.text) end)
+    end
+    -- Orphans from earlier get another try, e.g. back on the branch where their line exists
+    for _, item in ipairs(entry.orphans or {}) do
+        restore(item, function(row)
+            if item.char then
+                vim.api.nvim_buf_set_mark(bufnr, item.char, row, 0, {})
+            else
+                M.set_note(bufnr, row, item.text)
+            end
+        end)
+    end
+    M.Orphans[bufnr] = orphans
 end
 
-
---- Smart matching
----
---- @return integer # matched latest row number of given info (-1 > no any confident matching found)
-function M.smart_match(bufnr, old_row, old_filename, old_blame)
-    local search_files = M.RenameHistory[old_filename] or {}
-    -- Ensure current filename is in the list to search if it's the same file
-    local current_filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
-    local found_current = false
-    for _, f in ipairs(search_files) do
-        if f == current_filename then found_current = true; break end
-    end
-    if not found_current then table.insert(search_files, 1, current_filename) end
-
-    for _, filename in ipairs(search_files) do
-        local latest_blame = M.BlameCache[filename] and M.BlameCache[filename][old_row] or {}
-        local latest_content = latest_blame.content or ''
-        local old_content = old_blame.content or ''
-        -- Start to calculate matching score at original row
-        local similarity = M.levenshtein_distance(old_content, latest_content)
-        -- print('matching', old_content, latest_content, old_row, similarity)
-        -- print(vim.inspect(old_blame))
-        if similarity >= 0.9 then
-            return old_row
-        end
-        -- Find a best match by iterating comparing every line
-        local best_match = -1
-        local best_similarity = -1
-        local total_lines = vim.api.nvim_buf_line_count(bufnr)
-        local blames = M.BlameCache[filename] or {}
-        for new_row=1, total_lines do
-            local new_blame = blames[new_row] or {}
-            local content_similarity = M.levenshtein_distance(old_content, new_blame.content or '')
-            -- Basic row similarity (closeness to original row)
-            local row_dist = math.abs(old_row - new_row)
-            local row_similarity = (1 - (row_dist / total_lines))
-            -- Percentile similarity
-            local old_pct = old_blame.percentile or 0
-            local new_pct = new_blame.percentile or 0
-            local percentile_similarity = (1 - (math.abs(old_pct - new_pct) / 100))
-            -- Context similarity
-            local prev_similarity = M.levenshtein_distance(old_blame.prev or '', new_blame.prev or '')
-            local next_similarity = M.levenshtein_distance(old_blame.next or '', new_blame.next or '')
-            -- calculate overall similarity score
-            local overall_similarity = (content_similarity * 0.5) + (row_similarity * 0.1) +
-                                       (percentile_similarity * 0.1) + (prev_similarity * 0.15) + (next_similarity * 0.15)
-
-            if overall_similarity > 0.85 and overall_similarity > best_similarity then
-                best_similarity = overall_similarity
-                best_match = new_row
+--- Restore A-Z marks for files not opened yet, so `'A` can jump to them (opt-in: g:nvim_marks_restore_global)
+--- The store only holds rows, the anchor is matched when the file is opened
+function M.restore_global_marks(bufnr)
+    if vim.g.nvim_marks_restore_global ~= 1 then return end
+    local _, info, store_path = locate_store(bufnr)
+    if not info.top then return end
+    for key, entry in pairs(store.load(store_path).files) do
+        local path = vim.startswith(key, '/') and key or (info.top .. '/' .. key)
+        for _, mark in ipairs(entry.marks or {}) do
+            if mark.char:match('[A-Z]') and vim.fn.getpos("'" .. mark.char)[2] == 0 and vim.fn.filereadable(path) == 1 then
+                vim.fn.setpos("'" .. mark.char, {vim.fn.bufadd(path), mark.anchor.row, 1, 0})
             end
         end
-        -- print('tried rematching got best match', best_similarity, best_match)
-        if best_match ~= -1 then
-            return best_match
-        end
     end
-    -- Last resort: if same row content is decent, use it even if not "great"
-    local current_blame = M.BlameCache[current_filename] and M.BlameCache[current_filename][old_row] or {}
-    if M.levenshtein_distance(old_blame.content or '', current_blame.content or '') > 0.5 then
-        return old_row
-    end
-    return -1
+end
+
+--- @return string # the buffer's line at row, trimmed, for previews
+function M.line_preview(bufnr, row)
+    if not vim.api.nvim_buf_is_loaded(bufnr) then return '' end
+    local line = vim.api.nvim_buf_get_lines(bufnr, row-1, row, false)[1] or ''
+    return vim.trim(line)
 end
 
 
@@ -321,133 +263,65 @@ end
 --- Don't use vim native signs like `sign_define/sign_place` because neovim will create extmarks anyways
 function M.refresh_sign_bar(bufnr)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Get real bufnr (0 means current)
-    local vimmarks = M.scan_vimmarks(bufnr)  --  mark={char, filename, row}
     vim.api.nvim_buf_clear_namespace(bufnr, M.NS_Signs, 0, -1)  -- Delete all signs then add each
-    -- Local signs
-    for _, item in ipairs(vimmarks) do
-        local char, row, _, _ = unpack(item)
-        vim.api.nvim_buf_set_extmark(bufnr, M.NS_Signs, row-1, 0, {
-            id=math.random(1000, 9999),
-            end_row=row-1,  -- extmark is 0-indexed
-            end_col=0,
+    local marks = M.scan_vimmarks(bufnr)
+    vim.list_extend(marks, scan_buffer_global_marks(bufnr))
+    for _, item in ipairs(marks) do
+        local char, row = unpack(item)
+        vim.api.nvim_buf_set_extmark(bufnr, M.NS_Signs, row-1, 0, {  -- extmark is 0-indexed
             sign_text=char,
             sign_hl_group='WarningMsg',
         })
-    end
-    -- Global signs
-    local global_marks = M.scan_global_vimmarks()  --  mark={char, filename, row}
-    local buf_filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(bufnr), ":.")
-    for _, item in ipairs(global_marks) do
-        local char, row, filename, _ = unpack(item)
-        if filename == buf_filename then
-            vim.api.nvim_buf_set_extmark(bufnr, M.NS_Signs, row-1, 0, {
-                id=math.random(1000, 9999),
-                end_row=row-1,  -- extmark is 0-indexed
-                end_col=0,
-                sign_text=char,
-                sign_hl_group='WarningMsg',
-            })
-
-        end
     end
     -- Notes:
     -- No need, they are extmarks and will display signs already on creation
 end
 
 
---- Get all past file names of a given file (by git)
----
---- @return string[] # [filename1, filename2...]
-function M.git_rename_history(filename)
-    local cmd = string.format('git log --follow --name-only --format="" %s |uniq', filename)
-    local obj = vim.system({'sh', '-c', cmd}, {text = true}):wait()
-    if obj.code ~= 0 then
-        --- Files not tracked by git won't return data
-        -- print('Command failed: ' .. obj.stderr)
-        return {}
-    end
-    local names = {}
-    local lines = vim.split(obj.stdout, '[\r\n]+')
-    for _, s in ipairs(lines) do
-        if s ~= '' then table.insert(names, vim.trim(s)) end
-    end
-    return names
+--- Tests: `nvim -l tests/run.lua`
+local function read_fixture(name)
+    local dir = vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2)) .. '/../../tests/fixtures/'
+    return vim.fn.readfile(dir .. name)
 end
 
-
---- Blame whole file, and extract meta info of each line
----
---- @performance 2ms # means no need async for this
---- @return string[] # Array of blamed hash items [{details}, {details}]
-function M.git_blame(filename)
-    local cmd = { 'git', 'blame', '--date=unix', '-c', filename }
-    local obj = vim.system(cmd, {text = true}):wait()
-    if obj.code ~= 0 then
-        --- Files not tracked by git won't return data
-        -- print('Command failed: ' .. obj.stderr)
-        return {}
-    end
-    local lines = vim.split(obj.stdout, '[\r\n]+')
-    local blames = {}
-    for i=1, #lines do
-        --- e.g., a3672a14        (My Name     1768430769      14)if anything then...
-        --- e.g., 00000000        (Not Committed Yet      1768707934      15)local SetupStatusPerBuf = ...
-        local line_str = vim.trim(lines[i])
-        local commit_id, author, timestamp, row_str, content = line_str:match("^(%x+)%s+%(%s*(.-)\t+(%d+)\t+(%d+)%)(.*)$")
-        if row_str == nil or content == nil then goto continue end
-        local row = tonumber(row_str) or -1
-        local prev_pos = math.max(1, i-3)
-        local next_pos = math.min(#lines, i+3)
-        local prev_lines = {}
-        for j = prev_pos, i-1 do table.insert(prev_lines, lines[j]) end
-        local next_lines = {}
-        for j = i+1, next_pos do table.insert(next_lines, lines[j]) end
-        local info = {
-            commit_id = commit_id,
-            author = author,
-            timestamp = timestamp,
-            percentile = math.floor((row / #lines) * 100),
-            content = content,
-            prev = table.concat(prev_lines, '\n'),
-            next = table.concat(next_lines, '\n'),
-        }
-        blames[row] = info
-        ::continue::
-    end
-    return blames
+local function eq(actual, expected, msg)
+    assert(vim.deep_equal(actual, expected), string.format('%s: expected %s, got %s', msg, vim.inspect(expected), vim.inspect(actual)))
 end
 
---- Levenshtein Distance: calculate similarity between two strings
---- It will check how many characters to change in order to get from str1->str2
---- e.g., 'haha' & 'haha' -> 1; 'haha'&'hiha' -> 0.75; 'haha'&'lol'->0
----
---- @reference https://en.wikipedia.org/wiki/Levenshtein_distance
---- @return number # 0-1. 1 - identical; 0 - completely different
-function M.levenshtein_distance(str1, str2)
-    if str1 == str2 then return 1 end
-    if #str1 == 0 or #str2 == 0 then return 0 end
-    local v0 = {}
-    for i = 0, #str2 do v0[i] = i end
-    for i = 1, #str1 do
-        local v1 = { [0] = i }
-        for j = 1, #str2 do
-            local cost = (str1:sub(i, i) == str2:sub(j, j)) and 0 or 1
-            v1[j] = math.min(v1[j - 1] + 1, v0[j] + 1, v0[j - 1] + cost)
-        end
-        v0 = v1
+--- Save marks on v1, switch the file to v2 (like changing branch) and back, marks follow the lines
+function M.test_save_restore_across_versions()
+    local tmp_dir = vim.fn.tempname()
+    vim.fn.mkdir(tmp_dir, 'p')
+    store.dir_option = tmp_dir
+    local path = tmp_dir .. '/f.lua'
+    vim.fn.writefile(read_fixture('v1.lua'), path)
+    local bufnr = vim.fn.bufadd(path)
+    vim.fn.bufload(bufnr)
+    M.set_vimmark(bufnr, 'a', 8)  -- local function save(data)
+    M.set_vimmark(bufnr, 'b', 3)  -- local DEBUG = ..., deleted in v2
+    M.set_note(bufnr, 10, {'check path'})  -- print('saving', path)
+    M.save_all(bufnr)
+    local function reopen(fixture)
+        vim.api.nvim_buf_delete(bufnr, {force=true})
+        vim.fn.writefile(read_fixture(fixture), path)
+        bufnr = vim.fn.bufadd(path)
+        vim.fn.bufload(bufnr)
+        M.restore_marks(bufnr)
     end
-    local distance = v0[#str2]
-    -- Normalize to 0-1:
-    local max_len = math.max(#str1, #str2)
-    if max_len == 0 then return 1 end
-    local similarity = (1 - (distance / max_len))
-    return similarity
+    reopen('v2.lua')
+    eq(vim.api.nvim_buf_get_mark(bufnr, 'a')[1], 11, 'mark follows the line')
+    eq(vim.api.nvim_buf_get_mark(bufnr, 'b')[1], 0, 'mark on deleted line not placed')
+    eq(M.Orphans[bufnr][1].char, 'b', 'mark on deleted line kept as orphan')
+    eq(M.scan_notes(bufnr)[1][2], 13, 'note follows the edited line')
+    eq(M.scan_notes(bufnr)[1][3], {'check path'}, 'note text kept')
+    M.save_all(bufnr)
+    reopen('v1.lua')
+    eq(vim.api.nvim_buf_get_mark(bufnr, 'b')[1], 3, 'orphan comes back with its line')
+    eq(vim.api.nvim_buf_get_mark(bufnr, 'a')[1], 8, 'mark back on v1')
+    eq(M.scan_notes(bufnr)[1][2], 10, 'note back on v1, no drift')
+    vim.api.nvim_buf_delete(bufnr, {force=true})
+    store.dir_option = nil
+    vim.fn.delete(tmp_dir, 'rf')
 end
-
-
-function M.setup(opt)
-    -- ...
-end
-
 
 return M

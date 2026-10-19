@@ -1,4 +1,4 @@
 # nvim-marks
 Persistent marks and annotations built on top of existing Marks(Vim) and Extmarks(NeoVim).
 It makes sure all the marks and important annotations to code will be saved to a file under project scope.
-It's smart enough to match positions in case of any change.
+It finds each line again after changes, branch switches and across worktrees (one store per repo).

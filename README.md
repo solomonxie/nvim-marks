@@ -8,8 +8,8 @@ Persistent marks and annotations for Neovim that survive code changes, branch sw
 ## ✨ Features
 
 - [x] **Persistent Marks**: Marks that survive across sessions, branch switches, and code changes
-- [x] **Smart Matching**: Intelligent position restoration using git blame, line content, and surrounding context
-- [x] **Project-Scoped**: Storage organized per project in `.git/persistent_marks/`
+- [x] **Smart Matching**: Finds each line again by diffing against the saved file and matching line text plus surrounding lines
+- [x] **Branches & Worktrees**: One store per repo, shared by all worktrees; marks whose line isn't on the current branch are kept and come back later
 - [x] **Dual Support**: Works with both Vim marks (a-z, A-Z) and Extmarks for annotations
 - [x] **Visual Indicators**: Sign column shows all marks and notes at a glance
 - [x] **Automatic**: Save/restore marks automatically on buffer events
@@ -22,7 +22,8 @@ Persistent marks and annotations for Neovim that survive code changes, branch sw
 ## 📋 Requirements
 
 - **Neovim** 0.5+ (for extmarks support)
-- **Git** repository (for smart matching features)
+- **Neovim** 0.9+ (`vim.diff`)
+- **Git** (optional, to share marks across worktrees of a repo)
 
 ## 🚀 Installation
 
@@ -67,9 +68,9 @@ git clone https://github.com/solomonxie/nvim-marks.git ~/.config/nvim/pack/plugi
 ## 🎯 Quick Start
 
 1. **Open Marks Window**: Press `m` in any buffer
-2. **Add Mark**: Press any letter `a-z` in the marks window
+2. **Add Mark**: Press any letter `a-z`/`A-Z` in the marks window (except `q`, `j`, `k`, used by the window itself)
 3. **Add Note**: Press `+` to add an annotation
-4. **Delete Mark/Note**: Press `-` to remove marks/notes
+4. **Delete Mark/Note**: Press `-` on it, then `y` to confirm
 5. **Quit**: Press `q` to close the marks window
 
 ## 📖 Usage
@@ -81,10 +82,11 @@ git clone https://github.com/solomonxie/nvim-marks.git ~/.config/nvim/pack/plugi
 m
 
 " In the marks window:
-" Press a-z     - Add a local mark at current line
+" Press a-z     - Add a local mark at current line (except q, j, k)
 " Press A-Z     - Add a global mark at current line
+" Press <CR>    - Jump to the mark/note under the cursor
 " Press +       - Add a note/annotation
-" Press -       - Delete mark/note at current line
+" Press -       - Delete the mark/note under the cursor (asks y/n)
 " Press *       - List all marks in current file
 " Press q       - Quit marks window
 ```
@@ -105,8 +107,15 @@ m
 
 ## ⚙️ Configuration
 
-The plugin works out of the box.
-Customizations are to be done.
+Works out of the box. Marks are saved to `<dir>/<repo>/marks-history.json`, one file per repo shared by all its worktrees. `<dir>` defaults to `stdpath('data')/nvim-marks` (e.g. `~/.local/share/nvim/nvim-marks/myapp/marks-history.json`).
+
+```lua
+require('nvim-marks').setup({ dir = '~/notes/marks' })
+```
+
+Or in Vimscript: `let g:nvim_marks_dir = '~/notes/marks'`.
+
+Notes show at the end of their line, like `local x = 1    -- check this`; a multi-line note is joined with ` | `. To show them on their own lines above instead: `setup({ note_style = 'above' })` (or `let g:nvim_marks_note_style = 'above'`). Change the `    -- ` before an inline note with `note_prefix`.
 
 
 ## 🔧 How It Works
@@ -130,35 +139,26 @@ To satisfy all these requirements is really hard, which is why it's so difficult
 
 ### Smart Matching Strategy
 
-Nvim-marks uses a combination of strategies to ensure marks are "persistent-ish". It does not pursue 100% accuracy which could make it very slow and complex, but it tries to cover most common scenarios and be smart enough to handle most day-to-day cases.
+For each mark and note, nvim-marks saves an anchor: the row, the line's text and 2 lines above and below. It also saves a snapshot of the file's lines. While a file is open, Neovim moves marks itself as you edit; matching only runs when a file is opened:
 
-The plugin collects this information for each mark:
-
-- **File path** (relative to project root)
-- **Line number**
-- **Line content**
-- **Surrounding lines content**
-- **Git blame info** (commit hash, author, date, etc)
-
-When restoring a mark, nvim-marks tries to match each piece of information with weights and calculates the most confident position to restore the mark. If the overall confidence is low, it will still keep the mark showing in the Mark List but without an associated line number, so that the user can manually link it to a line whenever needed.
+1. Map the old row through a line diff (`vim.diff`) of the snapshot against the current file. If the line there still has the same text, done.
+2. Otherwise look for lines with the same text; the one whose surrounding lines match best wins, then the one closest to where it was expected.
+3. Otherwise fuzzy-match text plus surrounding lines within 50 rows of where it was expected.
+4. Otherwise it's an orphan: listed in the marks window under "Not found in this version", kept in the store, and tried again every time the file is opened (e.g. after switching back to the branch where the line exists). Delete it with `-`.
 
 ### Data Storage
 
-Marks are stored in JSON files based on your customization. By default it's under your project's `.git/persistent_marks/` directory:
+One JSON file per repo holds every file's marks and notes, keyed by the path from the repo root, so `src/a.lua` is the same file in every worktree:
 
 ```
-.git/persistent_marks/
-├── your-project-name/
-│   ├── src__main__lua.json
-│   └── vimmarks_global.json
+~/.local/share/nvim/nvim-marks/
+└── your-project-name.json
 ```
 
-Each file contains:
-- **Local marks/notes** (`vimmarks` and `notes`)
-- **Global marks** (`vimmarks_global`): Cross-file marks A-Z
+Saving merges into the file (only the current file's entry is replaced), so several nvim instances in different worktrees don't overwrite each other's files. Marks saved by the old version (`.git/persistent_marks/`) are picked up the first time a file is opened.
 
 ### Performance Considerations
 
 - **Fast startup**: ~1ms initialization time
-- **Efficient matching**: Uses cached git blame information
+- **Efficient matching**: One diff per file, fuzzy matching only near the expected row, no git calls besides one `rev-parse` per folder
 - **Minimal overhead**: No impact on normal editing workflow
