@@ -1,0 +1,17 @@
+{
+  "files": {
+    "a.lua": {
+      "marks": [],
+      "notes": [
+        {
+          "anchor": {"above": ["ab12cd34"], "below": [], "line": "x", "row": 2},
+          "text": ["one", "two"]
+        }
+      ],
+      "orphans": [
+        {"anchor": {"before": ["local a"], "after": [], "line": "local b", "row": 5}, "char": "b"}
+      ]
+    }
+  },
+  "version": 3
+}

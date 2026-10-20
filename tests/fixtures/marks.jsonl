@@ -1,0 +1,3 @@
+{"id":"3f9a1c0e","file":"jobs/common.py","kind":"note","text":"why fetch it again?","row":24,"line":"def get_job(","above":["e3b0c442","e3b0c442"],"below":["2a497258","60b6a494"]}
+{"id":"b71d22aa","file":"models/external.py","kind":"mark","char":"a","row":209,"line":"    platforms: conlist(","above":["ba5ec51d","ee1e3baf"],"below":["5c314946","15f24b8a"]}
+{"id":"c0ffee12","file":"jobs/common.py","kind":"note","text":"two\nlines","row":40,"line":"    return \"job\"","above":[],"below":[]}

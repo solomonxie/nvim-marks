@@ -1,7 +1,7 @@
 # nvim-marks
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Neovim](https://img.shields.io/badge/Neovim-0.5%2B-blue.svg)](https://neovim.io/)
+[![Neovim](https://img.shields.io/badge/Neovim-0.10%2B-blue.svg)](https://neovim.io/)
 
 Persistent marks and annotations for Neovim that survive code changes, branch switches, and file moves.
 
@@ -21,8 +21,7 @@ Persistent marks and annotations for Neovim that survive code changes, branch sw
 
 ## 📋 Requirements
 
-- **Neovim** 0.5+ (for extmarks support)
-- **Neovim** 0.9+ (`vim.diff`)
+- **Neovim** 0.10+
 - **Git** (optional, to share marks across worktrees of a repo)
 
 ## 🚀 Installation
@@ -68,10 +67,11 @@ git clone https://github.com/solomonxie/nvim-marks.git ~/.config/nvim/pack/plugi
 ## 🎯 Quick Start
 
 1. **Open Marks Window**: Press `m` in any buffer
-2. **Add Mark**: Press any letter `a-z`/`A-Z` in the marks window (except `q`, `j`, `k`, used by the window itself)
-3. **Add Note**: Press `+` to add an annotation
-4. **Delete Mark/Note**: Press `-` on it, then `y` to confirm
-5. **Quit**: Press `q` to close the marks window
+2. **Add Mark**: Press a capital letter `A-Z` in the marks window (except `G` and `N`); lowercase keys work as usual there
+3. **Add Note**: Press `+` to add an annotation (or edit the note already on that line)
+4. **Edit Note**: Press `e` on a note in the marks window
+5. **Delete Mark/Note**: Press `-` on it, then `y` to confirm
+6. **Quit**: Press `q` to close the marks window
 
 ## 📖 Usage
 
@@ -82,10 +82,10 @@ git clone https://github.com/solomonxie/nvim-marks.git ~/.config/nvim/pack/plugi
 m
 
 " In the marks window:
-" Press a-z     - Add a local mark at current line (except q, j, k)
-" Press A-Z     - Add a global mark at current line
+" Press A-Z     - Add a global mark at current line (except G, N)
 " Press <CR>    - Jump to the mark/note under the cursor
-" Press +       - Add a note/annotation
+" Press +       - Add a note/annotation, or edit the one on the current line
+" Press e       - Edit the note under the cursor
 " Press -       - Delete the mark/note under the cursor (asks y/n)
 " Press *       - List all marks in current file
 " Press q       - Quit marks window
@@ -107,13 +107,17 @@ m
 
 ## ⚙️ Configuration
 
-Works out of the box. Marks are saved to `<dir>/<repo>/marks-history.json`, one file per repo shared by all its worktrees. `<dir>` defaults to `stdpath('data')/nvim-marks` (e.g. `~/.local/share/nvim/nvim-marks/myapp/marks-history.json`).
+Works out of the box. Marks are saved to `<dir>/<repo>/marks.jsonl`, one file per repo shared by all its worktrees. `<dir>` defaults to `stdpath('data')/nvim-marks` (e.g. `~/.local/share/nvim/nvim-marks/myapp/marks.jsonl`).
 
 ```lua
 require('nvim-marks').setup({ dir = '~/notes/marks' })
 ```
 
 Or in Vimscript: `let g:nvim_marks_dir = '~/notes/marks'`.
+
+Files kept inside that folder, under a repo's name (e.g. your own notes in `~/notes/marks/myapp/plan.md`), are treated as part of that repo: their notes go into `~/notes/marks/myapp/marks.jsonl` with the repo's code notes.
+
+The marks file is checked every 10 seconds for changes made elsewhere (another nvim, e.g. in another worktree, or a `git pull`), and open files' notes are reloaded. Change it with `setup({ reload_interval = 30 })` or `let g:nvim_marks_reload_interval = 30`; `0` turns it off. A save only removes notes this nvim deleted, never ones added elsewhere that it hasn't loaded yet.
 
 Notes show at the end of their line, like `local x = 1    -- check this`; a multi-line note is joined with ` | `. To show them on their own lines above instead: `setup({ note_style = 'above' })` (or `let g:nvim_marks_note_style = 'above'`). Change the `    -- ` before an inline note with `note_prefix`.
 
@@ -139,26 +143,34 @@ To satisfy all these requirements is really hard, which is why it's so difficult
 
 ### Smart Matching Strategy
 
-For each mark and note, nvim-marks saves an anchor: the row, the line's text and 2 lines above and below. It also saves a snapshot of the file's lines. While a file is open, Neovim moves marks itself as you edit; matching only runs when a file is opened:
+For each mark and note, nvim-marks saves an anchor: the row, the line's text and short hashes of the 2 lines above and below. While a file is open, Neovim moves marks itself as you edit; matching only runs when a file is opened:
 
-1. Map the old row through a line diff (`vim.diff`) of the snapshot against the current file. If the line there still has the same text, done.
-2. Otherwise look for lines with the same text; the one whose surrounding lines match best wins, then the one closest to where it was expected.
-3. Otherwise fuzzy-match text plus surrounding lines within 50 rows of where it was expected.
+1. The saved row still has the same text: done.
+2. Otherwise look for lines with the same text; the one whose surrounding lines match the hashes best wins, then the one closest to the saved row.
+3. Otherwise fuzzy-match the text (surrounding lines must match too) within 50 rows of the saved row.
 4. Otherwise it's an orphan: listed in the marks window under "Not found in this version", kept in the store, and tried again every time the file is opened (e.g. after switching back to the branch where the line exists). Delete it with `-`.
+
+The marks window lists the notes of every file in the repo, the current file's first. `<CR>` opens the file at the note, `e` edits it, `-` deletes it, even for files that aren't open.
 
 ### Data Storage
 
-One JSON file per repo holds every file's marks and notes, keyed by the path from the repo root, so `src/a.lua` is the same file in every worktree:
+One JSONL file per repo holds every file's marks and notes, one line each, keyed by the path from the repo root, so `src/a.lua` is the same file in every worktree:
 
 ```
 ~/.local/share/nvim/nvim-marks/
-└── your-project-name.json
+└── your-project-name/
+    └── marks.jsonl
 ```
 
-Saving merges into the file (only the current file's entry is replaced), so several nvim instances in different worktrees don't overwrite each other's files. Marks saved by the old version (`.git/persistent_marks/`) are picked up the first time a file is opened.
+```json
+{"id":"3f9a1c0e","file":"src/a.lua","kind":"note","text":"why?","row":24,"line":"def run(","above":["e3b0c442","e3b0c442"],"below":["2a497258","60b6a494"]}
+{"id":"b71d22aa","file":"src/a.lua","kind":"mark","char":"a","row":8,"line":"local x = 1","above":["9f2c41d0"],"below":["77ab01ce"]}
+```
+
+A note's `text` is one string (its lines joined with `\n`). New marks and notes are appended; one that's edited or moved rewrites only its own line; a deleted one removes its line. So the file works well in git: every change is a one-line diff. Saving merges into the file (only the current file's lines change), so several nvim instances in different worktrees don't overwrite each other. A `marks-history.json` from the previous format is converted the first time it's read, and left in place.
 
 ### Performance Considerations
 
 - **Fast startup**: ~1ms initialization time
-- **Efficient matching**: One diff per file, fuzzy matching only near the expected row, no git calls besides one `rev-parse` per folder
+- **Efficient matching**: exact text lookups first, fuzzy matching only near the saved row, no git calls besides one `rev-parse` per folder
 - **Minimal overhead**: No impact on normal editing workflow

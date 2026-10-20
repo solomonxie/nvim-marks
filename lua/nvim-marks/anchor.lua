@@ -1,62 +1,39 @@
 --- Find where a saved line is now, after the file changed (edits, branch switch, worktree, rebase).
 ---
---- Each mark/note keeps an anchor: its row, the line's text and a few lines around it.
---- Each file also keeps a snapshot of its lines at save time. On restore:
---- 1. Map the old row through a line diff of snapshot -> current lines; done if the text still matches.
---- 2. Otherwise search lines with the same text: the best surrounding context wins, then the closest row.
---- 3. Otherwise fuzzy-match text+context near the expected row.
+--- Each mark/note keeps an anchor: its row, the line's text, and short hashes of the 2 lines above and below.
+--- On restore:
+--- 1. The saved row still has the same text: done.
+--- 2. Otherwise search lines with the same text: the best matching surroundings win, then the closest row.
+--- 3. Otherwise fuzzy-match the text (surroundings must match too) near the saved row.
 --- 4. Otherwise nil: the caller keeps it as an orphan instead of dropping it.
 
 local M = {}
 
-M.CONTEXT = 2  -- lines kept above and below
-M.FUZZY_WINDOW = 50  -- fuzzy search only within this many rows of the expected row
+M.CONTEXT = 2  -- lines hashed above and below
+M.FUZZY_WINDOW = 50  -- fuzzy search only within this many rows of the saved row
 M.FUZZY_THRESHOLD = 0.8
 local MAX_COMPARE_LEN = 120  -- cap line length for fuzzy comparison, levenshtein is O(n*m)
+local HASH_LEN = 8
 
 local function norm(s)
     return vim.trim(s or '')
+end
+
+--- @return string # short hash of a line, ignoring indentation
+function M.hash(line)
+    return vim.fn.sha256(norm(line)):sub(1, HASH_LEN)
 end
 
 --- Build an anchor for a row
 ---
 --- @param lines string[] # whole file
 --- @param row integer # 1-indexed
---- @return table # {row, line, before={...}, after={...}}
+--- @return table # {row, line, above={hash...}, below={hash...}}
 function M.make(lines, row)
-    local before, after = {}, {}
-    for i = math.max(1, row - M.CONTEXT), row - 1 do table.insert(before, lines[i]) end
-    for i = row + 1, math.min(#lines, row + M.CONTEXT) do table.insert(after, lines[i]) end
-    return { row = row, line = lines[row] or '', before = before, after = after }
-end
-
---- Line diff between two versions of a file, computed once per file and reused for every anchor
----
---- @return table[] # hunks {start_a, count_a, start_b, count_b}
-function M.diff(old_lines, new_lines)
-    local old_text = table.concat(old_lines, '\n') .. '\n'
-    local new_text = table.concat(new_lines, '\n') .. '\n'
-    return vim.diff(old_text, new_text, { result_type = 'indices', algorithm = 'histogram' })
-end
-
---- Map an old row to the new file through diff hunks
----
---- @return integer|nil, integer # new row (nil if the row itself was changed), expected row to search around
-function M.map_row(hunks, row)
-    local offset = 0
-    for _, hunk in ipairs(hunks) do
-        local start_a, count_a, start_b, count_b = unpack(hunk)
-        if count_a == 0 then
-            if row <= start_a then break end  -- pure insertion below start_a
-        else
-            if row < start_a then break end
-            if row < start_a + count_a then
-                return nil, start_b + math.min(row - start_a, math.max(count_b - 1, 0))
-            end
-        end
-        offset = offset + count_b - count_a
-    end
-    return row + offset, row + offset
+    local above, below = {}, {}
+    for i = math.max(1, row - M.CONTEXT), row - 1 do table.insert(above, M.hash(lines[i])) end
+    for i = row + 1, math.min(#lines, row + M.CONTEXT) do table.insert(below, M.hash(lines[i])) end
+    return { row = row, line = lines[row] or '', above = above, below = below }
 end
 
 --- Similarity of two strings by Levenshtein distance
@@ -82,24 +59,21 @@ function M.similarity(str1, str2)
     return 1 - (v0[#b] / math.max(#a, #b))
 end
 
-local function line_score(saved, current, fuzzy)
-    if current == nil then return 0 end
-    saved, current = norm(saved), norm(current)
-    if saved == current then return 1 end
-    if not fuzzy then return 0 end
-    return M.similarity(saved, current)
-end
-
---- @return number # 0-1, how well the lines around `row` match the anchor's before/after lines
-local function context_score(anchor, lines, row, fuzzy)
-    local total, score = 0, 0
-    for k, text in ipairs(anchor.before) do
-        total = total + 1
-        score = score + line_score(text, lines[row - (#anchor.before - k + 1)], fuzzy)
+--- @return number # 0-1, share of the anchor's above/below hashes that match the lines around `row`
+local function context_score(anchor, lines, row, hashes)
+    local function hash_at(i)
+        if lines[i] == nil then return nil end
+        hashes[i] = hashes[i] or M.hash(lines[i])
+        return hashes[i]
     end
-    for k, text in ipairs(anchor.after) do
+    local total, score = 0, 0
+    for k, h in ipairs(anchor.above or {}) do
         total = total + 1
-        score = score + line_score(text, lines[row + k], fuzzy)
+        if hash_at(row - (#anchor.above - k + 1)) == h then score = score + 1 end
+    end
+    for k, h in ipairs(anchor.below or {}) do
+        total = total + 1
+        if hash_at(row + k) == h then score = score + 1 end
     end
     if total == 0 then return 0 end
     return score / total
@@ -109,21 +83,20 @@ end
 ---
 --- @param anchor table # from M.make()
 --- @param lines string[] # current file
---- @param hunks table[]|nil # M.diff(snapshot, lines); nil when there's no trusted snapshot
+--- @param hashes table|nil # cache of line hashes, pass the same table for every anchor of one file
 --- @return integer|nil # row, or nil when nothing matches confidently
-function M.locate(anchor, lines, hunks)
+function M.locate(anchor, lines, hashes)
+    hashes = hashes or {}
     local target = norm(anchor.line)
     local expected = anchor.row
-    if hunks then
-        local row
-        row, expected = M.map_row(hunks, anchor.row)
-        if row and lines[row] and norm(lines[row]) == target then return row end
+    if lines[expected] and norm(lines[expected]) == target and (target ~= '' or context_score(anchor, lines, expected, hashes) >= 0.5) then
+        return expected
     end
-    -- Same text: best context, then the closest to the expected row
+    -- Same text: best context, then the closest to the saved row
     local best, best_score, best_dist = nil, -1, math.huge
     for row, text in ipairs(lines) do
         if norm(text) == target then
-            local score = context_score(anchor, lines, row, false)
+            local score = context_score(anchor, lines, row, hashes)
             local dist = math.abs(row - expected)
             if score > best_score or (score == best_score and dist < best_dist) then
                 best, best_score, best_dist = row, score, dist
@@ -133,15 +106,25 @@ function M.locate(anchor, lines, hunks)
     -- A blank line on its own says nothing, it needs its context to match too
     if best and (target ~= '' or best_score >= 0.5) then return best end
     if target == '' then return nil end
-    -- Edited line: fuzzy text + context, near the expected row only
+    -- Edited line: fuzzy text + exact context, near the saved row only
     best, best_score = nil, M.FUZZY_THRESHOLD
     for row = math.max(1, expected - M.FUZZY_WINDOW), math.min(#lines, expected + M.FUZZY_WINDOW) do
-        local score = 0.6 * line_score(target, lines[row], true) + 0.4 * context_score(anchor, lines, row, true)
+        local score = 0.6 * M.similarity(target, norm(lines[row])) + 0.4 * context_score(anchor, lines, row, hashes)
         if score > best_score then
             best, best_score = row, score
         end
     end
     return best
+end
+
+--- Convert an anchor saved by v2 (`before`/`after` holding full lines) to hashes
+function M.upgrade(anchor)
+    if anchor.above == nil and (anchor.before or anchor.after) then
+        anchor.above = vim.tbl_map(M.hash, anchor.before or {})
+        anchor.below = vim.tbl_map(M.hash, anchor.after or {})
+        anchor.before, anchor.after = nil, nil
+    end
+    return anchor
 end
 
 
@@ -162,34 +145,38 @@ function M.test_similarity()
     eq(M.similarity('', 'abc'), 0, 'empty')
 end
 
-function M.test_map_row_through_diff()
+function M.test_anchor_is_small()
+    local old = read_fixture('v1.lua')
+    local a = M.make(old, 8)
+    eq(a.line, 'local function save(data)', 'keeps the line text')
+    eq(#a.above + #a.below, 4, 'two hashes above and below')
+    eq(#a.above[1], HASH_LEN, 'short hashes')
+end
+
+function M.test_locate()
     local old, new = read_fixture('v1.lua'), read_fixture('v2.lua')
-    local hunks = M.diff(old, new)
+    local hashes = {}
     -- `local function save(data)` is line 8 in v1 and line 11 in v2 (3 lines inserted above)
-    eq(M.map_row(hunks, 8), 11, 'shifted by insertion')
-    eq(M.map_row(hunks, 1), 1, 'above any change')
-end
-
-function M.test_locate_with_snapshot()
-    local old, new = read_fixture('v1.lua'), read_fixture('v2.lua')
-    local hunks = M.diff(old, new)
-    eq(M.locate(M.make(old, 8), new, hunks), 11, 'unchanged line follows the diff')
-    -- `return nil` appears twice in each version, context picks the right one
-    eq(M.locate(M.make(old, 16), new, hunks), 19, 'duplicate text resolved by context')
-end
-
-function M.test_locate_without_snapshot()
-    local old, new = read_fixture('v1.lua'), read_fixture('v2.lua')
-    eq(M.locate(M.make(old, 8), new, nil), 11, 'found by exact text')
+    eq(M.locate(M.make(old, 8), new, hashes), 11, 'moved line found by exact text')
+    eq(M.locate(M.make(old, 1), new, hashes), 1, 'unchanged row')
+    -- `return nil` appears twice in each version, the surroundings pick the right one
+    eq(M.locate(M.make(old, 16), new, hashes), 19, 'duplicate text resolved by context')
+    eq(M.locate(M.make(old, 20), new, hashes), 23, 'other duplicate resolved by context')
     -- `print('saving', path)` became `print('saving file', path)` in v2
-    eq(M.locate(M.make(old, 10), new, nil), 13, 'edited line found by fuzzy match')
-    eq(M.locate(M.make(old, 20), new, nil), 23, 'duplicate text resolved by context')
+    eq(M.locate(M.make(old, 10), new, hashes), 13, 'edited line found by fuzzy match')
 end
 
 function M.test_locate_orphan()
     local old, new = read_fixture('v1.lua'), read_fixture('v2.lua')
     -- `local DEBUG = os.getenv('DEBUG')` was deleted in v2
-    eq(M.locate(M.make(old, 3), new, M.diff(old, new)), nil, 'deleted line is an orphan')
+    eq(M.locate(M.make(old, 3), new), nil, 'deleted line is an orphan')
+end
+
+function M.test_upgrade_v2_anchor()
+    local old, new = read_fixture('v1.lua'), read_fixture('v2.lua')
+    local v2 = {row=16, line=old[16], before={old[14], old[15]}, after={old[17], old[18]}}
+    eq(M.locate(M.upgrade(v2), new), 19, 'old anchor still resolves after upgrade')
+    eq(v2.before, nil, 'full lines dropped')
 end
 
 return M
