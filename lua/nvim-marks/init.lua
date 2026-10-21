@@ -14,22 +14,28 @@ local utils = require('nvim-marks.utils')
 
 local IsBufferSetup = {}
 local NS_Preview = vim.api.nvim_create_namespace('nvim-marks.preview')
-local NS_Placeholder = vim.api.nvim_create_namespace('nvim-marks.placeholder')
 local EditKey = 'e'  -- edits the note under the cursor in the menu
 local PanelMarkChars = 'ABCDEFHIJKLMOPQRSTUVWXYZ'  -- capitals set a mark from the menu; lowercase keys (and G, N) keep their normal meaning there
 local NoteWidth = 80  -- notes column in the menu is as wide as the longest note, up to this; longer ones are cut with `…`
 local PathWidthMax = 50  -- the path column is as wide as the longest path, up to this
+local MenuOrigin = nil  -- {win, bufnr, row} the marks list was last opened from, for `[` in the editor to go back to
+local StatusTitles = {open='Notes', todo='TODO', done='DONE', anchor='Anchors'}
+local SectionOrder = {'open', 'todo', 'anchor', 'done'}  -- list sections top to bottom (same as the `@` cycle)
 local MarksMetadata = {}  -- {win_bufnr: {row: metadata}}, kept in Lua since vim.b turns sparse tables into lists
 
 
 --- Cut or pad a string to exactly `width` display columns, `…` where it was cut
 local function fit(text, width)
     if vim.fn.strdisplaywidth(text) > width then
-        local chars = vim.fn.strchars(text)
-        while chars > 0 and vim.fn.strdisplaywidth(vim.fn.strcharpart(text, 0, chars)) > width - 1 do
+        -- Cut at `width` characters first (a char is at least one column), then drop the few that are wide;
+        -- notes can be hundreds of characters, so shortening one character at a time was slow
+        local chars = width - 1
+        text = vim.fn.strcharpart(text, 0, chars)
+        while chars > 0 and vim.fn.strdisplaywidth(text) > width - 1 do
             chars = chars - 1
+            text = vim.fn.strcharpart(text, 0, chars)
         end
-        text = vim.fn.strcharpart(text, 0, chars) .. '…'
+        text = text .. '…'
     end
     return text .. string.rep(' ', width - vim.fn.strdisplaywidth(text))
 end
@@ -43,7 +49,7 @@ end
 
 --- @return string # a note's lines on one line
 local function note_summary(note_lines)
-    return table.concat(vim.tbl_filter(function(l) return vim.trim(l) ~= '' end, note_lines), ' | ')
+    return utils.one_line(note_lines)
 end
 
 --- @return string # `>> path:row  "line text"` shown after a note in the menu
@@ -58,68 +64,132 @@ end
 ---
 --- @param initial string[]|nil # existing note's lines, to edit it
 --- @param on_save function|nil # called with the typed lines; default adds a note at target_row
-function M.switchEditMode(target_bufnr, target_row, initial, on_save)
+--- @param on_delete function|nil # deletes the existing note, for `-` in normal mode; nil for a new note
+--- @param status_ops table|nil # {get=fn() -> status, cycle=fn() -> new status} for `@`; nil for a new note
+function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete, status_ops)
     local edit_bufnr = M.create_window()
     if initial then vim.api.nvim_buf_set_lines(edit_bufnr, 0, -1, false, initial) end
-    -- Hint as a gray line above the text, always shown; it isn't part of the note
+    -- Hint in the window's top bar: always visible however the text scrolls, and not part of the note
+    -- (a virtual line above line 1 hides as soon as the view scrolls past it)
     local function show_hint()
-        vim.api.nvim_buf_clear_namespace(edit_bufnr, NS_Placeholder, 0, -1)
-        vim.api.nvim_buf_set_extmark(edit_bufnr, NS_Placeholder, 0, 0, {
-            virt_lines={{{'> Type a note | `Ctrl-s`/`Ctrl-c`/`:w` save and quit | `q` (normal mode) quit', 'Comment'}}},
-            virt_lines_above=true,
-            right_gravity=false,  -- stays on line 1 when lines are inserted at the top
-        })
+        -- q and < save the note as they leave (there's no separate save key); - and @ only exist for saved notes
+        local hint = 'Help: q quit | < return to main menu'
+        if on_delete then hint = hint .. ' | - delete this note' end
+        if status_ops then
+            local status = status_ops.get()
+            local symbol = require('nvim-marks.store').STATUS_SYMBOLS[status]
+            hint = (symbol ~= '' and symbol .. ' ' or '') .. StatusTitles[status] .. ' | ' .. hint .. ' | @ change status'
+        end
+        vim.wo.winbar = '%#Comment#' .. hint:gsub('%%', '%%%%')
     end
     show_hint()
-    -- Deleting line 1 (e.g. `dd`) removes the extmark with it, so put it back
-    vim.api.nvim_create_autocmd({'TextChanged', 'TextChangedI'}, {buffer=edit_bufnr, callback=show_hint})
-    on_save = on_save or function(text) utils.set_note(target_bufnr, target_row, text) end
-    for _, key in ipairs({'<C-s>', '<C-c>'}) do
-        vim.keymap.set({'n', 'i', 'v'}, key, function() M.save_note(edit_bufnr, target_bufnr, on_save) end, {buffer=true, silent=true, nowait=true })
+    -- Key: next status, saved right away (the text is saved separately, when you save the note)
+    if status_ops then
+        vim.keymap.set('n', '@', function()
+            local status = status_ops.cycle()
+            show_hint()
+            vim.api.nvim_echo({{'Status: ' .. StatusTitles[status], 'Normal'}}, false, {})
+        end, {buffer=edit_bufnr, silent=true, nowait=true})
     end
-    -- `:w` / `:wq` / `:x` save the note too: an acwrite buffer hands the write to us instead of to a file
-    vim.bo[edit_bufnr].buftype = 'acwrite'
-    vim.api.nvim_buf_set_name(edit_bufnr, 'nvim-marks://note/' .. edit_bufnr)
-    vim.bo[edit_bufnr].modified = false
-    vim.api.nvim_create_autocmd('BufWriteCmd', {buffer=edit_bufnr, callback=function()
-        M.save_note(edit_bufnr, target_bufnr, on_save, true)
-    end})
+    -- Margin under the bar: a virtual blank line above line 1, not part of the note. nvim only draws a line
+    -- above the first one when the view says so (topfill), so ask for it now and whenever it scrolls back to the top
+    local function show_margin()
+        -- Editing line 1 (`O`, `dd`) can move or drop the extmark, so put it back on line 1 each time
+        vim.api.nvim_buf_clear_namespace(edit_bufnr, NS_Preview, 0, -1)
+        vim.api.nvim_buf_set_extmark(edit_bufnr, NS_Preview, 0, 0, {virt_lines={{{'', 'Normal'}}}, virt_lines_above=true})
+        if vim.api.nvim_get_current_buf() ~= edit_bufnr then return end
+        local view = vim.fn.winsaveview()
+        if view.topline == 1 and view.topfill == 0 then vim.fn.winrestview({topline=1, topfill=1}) end
+    end
+    vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI', 'WinScrolled', 'TextChanged', 'TextChangedI'}, {buffer=edit_bufnr, callback=show_margin})
+    on_save = on_save or function(text) utils.set_note(target_bufnr, target_row, text) end
+    -- Key: save, then back to the marks list, opened for the file and line the editor was opened from
+    vim.keymap.set('n', '<', function()
+        local origin = MenuOrigin
+        M.save_note(edit_bufnr, target_bufnr, on_save, false, on_delete)
+        if origin and vim.api.nvim_win_is_valid(origin.win) and vim.api.nvim_buf_is_valid(origin.bufnr) then
+            vim.api.nvim_set_current_win(origin.win)
+            vim.api.nvim_win_set_buf(origin.win, origin.bufnr)
+            vim.api.nvim_win_set_cursor(origin.win, {math.min(origin.row, vim.api.nvim_buf_line_count(origin.bufnr)), 0})
+            M.openMarks()
+        end
+    end, {buffer=edit_bufnr, silent=true, nowait=true})
+    -- Key: delete the note being edited, after a y/n
+    if on_delete then
+        vim.keymap.set('n', '-', function()
+            if not M.confirm('Delete this note?') then return end
+            on_delete()
+            vim.bo[edit_bufnr].modified = false
+            vim.api.nvim_buf_delete(edit_bufnr, {force=true})
+            if target_bufnr then
+                utils.save_all(target_bufnr)  -- to the store right away, like a save
+                utils.refresh_sign_bar(target_bufnr)
+            end
+            vim.api.nvim_echo({{'Deleted note', 'Normal'}}, false, {})
+        end, {buffer=edit_bufnr, silent=true, nowait=true})
+    end
+    -- Key: q (normal mode) saves the note and closes the editor
+    vim.keymap.set('n', 'q', function() M.save_note(edit_bufnr, target_bufnr, on_save, false, on_delete) end, {buffer=edit_bufnr, silent=true, nowait=true})
     if initial then
-        vim.api.nvim_win_set_cursor(0, {#initial, 0})  -- an existing note opens in normal mode
+        vim.api.nvim_win_set_cursor(0, {1, 0})  -- an existing note opens in normal mode, at its first line
     else
         vim.cmd('startinsert')
     end
+    show_margin()
 end
 
 --- Edit a note listed in the menu, open buffer (extmark) or saved file
 function M.edit_note(note)
+    local opened_with = vim.deepcopy(note.text)
     M.switchEditMode(note.bufnr, note.row, note.text, function(text)
+        -- Not changed in the editor: write nothing, so an edit made meanwhile elsewhere (an agent's reply) stays
+        if vim.deep_equal(text, opened_with) then return end
+        -- Changed: apply the user's edit on top of the latest text on disk if only lines were added at the end
+        local latest = utils.latest_note_text(note)
+        if latest and not vim.deep_equal(latest, opened_with) then
+            text = utils.merge_note_edit(opened_with, latest, text)
+        end
         if note.extmark_id then
             local record_id = utils.RecordIds[note.bufnr].notes[note.extmark_id]
             vim.api.nvim_buf_del_extmark(note.bufnr, utils.NS_Notes, note.extmark_id)
-            utils.set_note(note.bufnr, note.row, text, record_id)  -- same record, so it keeps its line in the store
+            utils.set_note(note.bufnr, note.row, text, record_id, note.status)  -- same record, so it keeps its line in the store
         else
             utils.edit_stored(note.store_path, note.id, text)
         end
-    end)
+    end, function()
+        if note.extmark_id then
+            vim.api.nvim_buf_del_extmark(note.bufnr, utils.NS_Notes, note.extmark_id)
+        else
+            utils.edit_stored(note.store_path, note.id, nil)
+        end
+    end, {
+        get = function() return note.status or 'open' end,
+        cycle = function() return M.cycle_status(note) end,
+    })
 end
 
-function M.openMarks()
+--- @param opt table|nil # {focus=note}: put the cursor on this note instead of on the current line's
+function M.openMarks(opt)
+    opt = opt or {}
     local target_bufnr = vim.api.nvim_get_current_buf()
     local target_row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
-    local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(target_bufnr), ":.")
+    MenuOrigin = {win=vim.api.nvim_get_current_win(), bufnr=target_bufnr, row=target_row}
+    -- Path from the repo root, the same wherever nvim's cwd is (a `:cd` doesn't change what's shown or matched)
+    local filename = utils.display_name(vim.api.nvim_buf_get_name(target_bufnr))
     -- Prepare content
-    local content_lines = {
-        '> Help: Press a capital letter to add that mark (not G N) | `+` Add note | `' .. EditKey .. '` Edit note | `-` Delete (y/n) | `<CR>` Jump | `q` Quit',
-    }
+    local content_lines = {''}  -- a blank first line: margin under the hint bar
+    local hint = 'Help: A-Z (not G N) add mark | + add note | ' .. EditKey .. ' edit note | @ next status | - delete (y/n) | <CR> jump | q quit'
     local previews = {}  -- {window_row: text}, appended in gray after each item
     -- Render marks
     local marks_metadata = {}
     local vimmarks = utils.scan_vimmarks(target_bufnr)
     local global_marks = utils.scan_global_vimmarks()
+    local function section(title)  -- a blank line between sections, none before the first
+        if #content_lines > 1 then table.insert(content_lines, '') end
+        table.insert(content_lines, title)
+    end
     if #vimmarks + #global_marks > 0 then
-        table.insert(content_lines, '')
-        table.insert(content_lines, '# Marks')
+        section('# Marks')
     end
     for _, item in ipairs(vimmarks) do
         local char, row = unpack(item)
@@ -130,11 +200,11 @@ function M.openMarks()
     end
     -- Render global marks
     for _, item in ipairs(global_marks) do
-        local char, row, global_filename = unpack(item)
-        local display = string.format("(%s) %s:%d", char, global_filename, row)
+        local char, row, path, name = unpack(item)
+        local display = string.format("(%s) %s:%d", char, name, row)
         table.insert(content_lines, display)
-        previews[#content_lines] = utils.line_preview(vim.fn.bufnr(global_filename), row)
-        marks_metadata[#content_lines] = { type = 'global', char = char, row = row, filename = global_filename }
+        previews[#content_lines] = utils.line_preview(vim.fn.bufnr(path), row)
+        marks_metadata[#content_lines] = { type = 'global', char = char, row = row, filename = name, path = path }
     end
     -- Render notes of every file in the repo: open buffers from memory (has unsaved changes), the rest from the store
     local notes = {}
@@ -146,8 +216,9 @@ function M.openMarks()
         live_keys[key] = true
         local name = key  -- path from the repo root, the same as for closed files, so the order doesn't depend on cwd
         for _, item in ipairs(utils.scan_notes(bufnr)) do
-            local id, row, note_lines = unpack(item)
-            table.insert(notes, {bufnr=bufnr, extmark_id=id, row=row, text=note_lines, filename=name, line=utils.line_preview(bufnr, row)})
+            local id, row, note_lines, status = unpack(item)
+            table.insert(notes, {bufnr=bufnr, extmark_id=id, row=row, text=note_lines, status=status or 'open',
+                                 filename=name, line=utils.line_preview(bufnr, row)})
         end
     end
     add_live(target_bufnr)
@@ -155,8 +226,8 @@ function M.openMarks()
         if bufnr ~= target_bufnr and IsBufferSetup[bufnr] and vim.api.nvim_buf_is_loaded(bufnr) then add_live(bufnr) end
     end
     for _, item in ipairs(utils.scan_repo_items(target_bufnr)) do
-        if item.kind == 'note' and not live_keys[item.file] then
-            table.insert(notes, {id=item.id, path=item.path, store_path=store_path,
+        if item.kind == 'note' and not live_keys[item.file] and not utils.is_empty_note(item.text) then
+            table.insert(notes, {id=item.id, path=item.path, exists=item.exists, store_path=store_path, status=item.status or 'open',
                                  row=item.row, text=item.text, filename=item.file, line=vim.trim(item.line or '')})
         end
     end
@@ -165,24 +236,34 @@ function M.openMarks()
         if a.filename ~= b.filename then return a.filename < b.filename end
         return a.row < b.row
     end)
-    if #notes ~= 0 then
-        table.insert(content_lines, '')
-        table.insert(content_lines, '# Notes (' .. #notes .. ')')
+    -- One section per status, done last; columns line up across all of them
+    local function labeled(note)
+        note.label = note.label or (utils.status_prefix(note.status) .. note_summary(note.text))
+        return note.label
     end
-    local note_width = column_width(vim.tbl_map(function(note) return note_summary(note.text) end, notes), NoteWidth)
+    local note_width = column_width(vim.tbl_map(labeled, notes), NoteWidth)
     local path_width = column_width(vim.tbl_map(function(note) return note.filename .. ':' .. note.row end, notes), PathWidthMax)
     local number_width = #tostring(#notes)
-    for i, note in ipairs(notes) do
-        local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
-        table.insert(content_lines, number .. ' ' .. fit(note_summary(note.text), note_width))
-        previews[#content_lines] = note_tail(note.filename .. ':' .. note.row, path_width, note.line)
-        marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = 'note' })
+    local dimmed = {}  -- {window_row=true}: done rows, drawn all in gray
+    local i = 0
+    for _, status in ipairs(SectionOrder) do
+        local group = vim.tbl_filter(function(note) return note.status == status end, notes)
+        if #group > 0 then
+            section('# ' .. StatusTitles[status] .. ' (' .. #group .. ')')
+            for _, note in ipairs(group) do
+                i = i + 1
+                local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
+                table.insert(content_lines, number .. ' ' .. fit(labeled(note), note_width))
+                previews[#content_lines] = note_tail(note.filename .. ':' .. note.row, path_width, note.line)
+                marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = 'note' })
+                if status == 'done' then dimmed[#content_lines] = true end
+            end
+        end
     end
     -- Render orphans: saved marks/notes whose line isn't in this version of the file (e.g. another branch)
     local orphans = utils.Orphans[target_bufnr] or {}
     if #orphans ~= 0 then
-        table.insert(content_lines, '')
-        table.insert(content_lines, '# Not found in this version (kept until deleted)')
+        section('# Not found in this version (kept until deleted)')
     end
     local function orphan_label(item) return item.char and ('(' .. item.char .. ')') or ('* ' .. note_summary(item.text)) end
     local orphan_width = column_width(vim.tbl_map(orphan_label, orphans), NoteWidth + 2)
@@ -196,23 +277,43 @@ function M.openMarks()
     local gray_from = {}
     for row, preview in pairs(previews) do
         if preview ~= '' then
-            if row > 1 and not preview:match('^ >> ') then preview = '  ' .. preview:sub(1, 80) end
+            if not preview:match('^ >> ') then preview = '  ' .. preview:sub(1, 80) end
             gray_from[row] = #content_lines[row]
             content_lines[row] = content_lines[row] .. preview
         end
     end
     -- Create a window and display
-    local win_bufnr = M.create_window()
+    if #content_lines == 1 then table.insert(content_lines, '(no marks or notes yet)') end
+    local win_bufnr = M.create_window(#content_lines + 1)  -- + the top bar
     MarksMetadata[win_bufnr] = marks_metadata
     vim.api.nvim_buf_set_lines(win_bufnr, 0, -1, false, content_lines)
-    -- Put the cursor on the mark/note of the line we came from, if any
-    for row = 1, #content_lines do
+    -- Put the cursor on the note asked for (after @), else on the mark/note of the line we came from, if any
+    local function same_note(a, b)
+        return a.type == 'note' and ((b.extmark_id and a.extmark_id == b.extmark_id and a.bufnr == b.bufnr) or (b.id and a.id == b.id))
+    end
+    local focused = false
+    if opt.focus then
+        for row = 1, #content_lines do
+            if marks_metadata[row] and same_note(marks_metadata[row], opt.focus) then
+                vim.api.nvim_win_set_cursor(0, {row, 0})
+                focused = true
+                break
+            end
+        end
+    end
+    for row = focused and math.huge or 1, #content_lines do
         local item = marks_metadata[row]
-        local here = item and (item.type == 'note' and item.bufnr == target_bufnr or item.type ~= 'note' and item.filename == filename)
+        local target_path = vim.fn.resolve(vim.api.nvim_buf_get_name(target_bufnr))
+        local here = item and (item.type == 'note' and item.bufnr == target_bufnr
+            or item.type == 'mark' or item.type == 'global' and vim.fn.resolve(item.path) == target_path)
         if here and item.type ~= 'orphan' and item.row == target_row then
             vim.api.nvim_win_set_cursor(0, {row, 0})
             break
         end
+    end
+    -- Archived notes all in gray
+    for row in pairs(dimmed) do
+        vim.api.nvim_buf_set_extmark(win_bufnr, NS_Preview, row-1, 0, {end_row=row-1, end_col=#content_lines[row], hl_group='Comment', priority=200})
     end
     -- Gray the path and line text, kept as real text so `/` search finds them
     for row, start_col in pairs(gray_from) do
@@ -220,9 +321,14 @@ function M.openMarks()
             end_row=row-1, end_col=#content_lines[row], hl_group='Comment', priority=200,
         })
     end
-    -- Help line in gray, over the markdown highlighting
-    vim.api.nvim_buf_set_extmark(win_bufnr, NS_Preview, 0, 0, {end_row=1, hl_group='Comment', hl_eol=true, priority=200})
+    -- Keys hint in the window's top bar, so it stays visible when the list scrolls
+    vim.wo.winbar = '%#Comment#' .. hint:gsub('%%', '%%%%')
     vim.cmd('setlocal nomodifiable')
+    -- Show the list from its first line (the section titles above the cursor stay in view); scroll only as much as
+    -- needed when the focused row is below the window
+    local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
+    local top = math.max(1, cursor_row - vim.api.nvim_win_get_height(0) + 1)
+    vim.fn.winrestview({topline=top, lnum=cursor_row, col=0})
     -- Key: any letter adds that mark, except the menu's own keys
     local opts = { buffer = win_bufnr, silent = true, nowait = true }
     for char in PanelMarkChars:gmatch('.') do
@@ -239,6 +345,19 @@ function M.openMarks()
             if note.bufnr == target_bufnr and note.row == target_row then return M.edit_note(note) end
         end
         M.switchEditMode(target_bufnr, target_row)
+    end, opts)
+    -- Key: next status for the note under the cursor. The list redraws with the note in its new section and the
+    -- cursor still on it, so pressing @ again keeps cycling the same note
+    vim.keymap.set('n', '@', function()
+        local mark = M.get_mark_at_cursor()
+        if not (mark and mark.type == 'note') then
+            vim.api.nvim_echo({{'Not on a note', 'WarningMsg'}}, false, {})
+            return
+        end
+        local status = M.cycle_status(mark)
+        vim.cmd('bwipeout!')
+        M.openMarks({focus=mark})
+        vim.api.nvim_echo({{'Status: ' .. StatusTitles[status], 'Normal'}}, false, {})
     end, opts)
     -- Key: Edit the note under the cursor
     vim.keymap.set('n', EditKey, function()
@@ -257,8 +376,8 @@ function M.openMarks()
         elseif mark then
             vim.cmd('bwipeout!')
             if mark.type == 'global' then
-                vim.cmd('edit ' .. mark.filename)
-                vim.api.nvim_win_set_cursor(0, {mark.row, 0})
+                vim.cmd('edit ' .. vim.fn.fnameescape(mark.path))
+                vim.api.nvim_win_set_cursor(0, {math.min(mark.row, vim.api.nvim_buf_line_count(0)), 0})
             elseif mark.type == 'note' and mark.bufnr ~= target_bufnr then
                 M.jump_to_note(mark)
             else
@@ -275,7 +394,7 @@ function M.openMarks()
         if not M.confirm('Delete ' .. label .. '?') then return end
         if mark then
             if mark.type == 'global' or mark.type == 'mark' then
-                local bufnr = mark.type == 'global' and vim.fn.bufadd(mark.filename) or target_bufnr
+                local bufnr = mark.type == 'global' and vim.fn.bufadd(mark.path) or target_bufnr
                 vim.api.nvim_buf_del_mark(bufnr, mark.char)
                 utils.refresh_sign_bar(bufnr)
             elseif mark.type == 'note' and mark.extmark_id then
@@ -300,10 +419,29 @@ function M.openMarks()
     vim.cmd('redraw')
 end
 
+--- Move a note to its next status and save it right away (open buffer: via its extmark; closed file: in the store)
+---
+--- @return string # the new status
+function M.cycle_status(note)
+    local status = utils.next_status(note.status)
+    if note.extmark_id then
+        utils.set_note_status(note.bufnr, note.extmark_id, status)
+        utils.save_all(note.bufnr)
+    else
+        utils.edit_stored(note.store_path, note.id, nil, status)
+    end
+    note.status = status
+    return status
+end
+
 --- Open a note's file and put the cursor on it (the note may have moved since it was saved)
 function M.jump_to_note(note)
     if note.bufnr then
         vim.api.nvim_set_current_buf(note.bufnr)
+    elseif note.exists == false then
+        -- Don't open an empty buffer at a made-up path
+        vim.api.nvim_echo({{'Not found in any checkout of this repo: ' .. note.filename, 'WarningMsg'}}, false, {})
+        return
     else
         vim.cmd('edit ' .. vim.fn.fnameescape(note.path))
     end
@@ -333,18 +471,37 @@ function M.get_mark_at_cursor()
     return metadata[row]
 end
 
+--- @param content_lines integer|nil # lines to show; the window fits them, between the min and max height
+--- @return integer # window height
+function M.window_height(content_lines)
+    local max = vim.g.nvim_marks_height or 0.4  -- max height: a share of the screen (< 1) or a number of lines
+    if max < 1 then max = math.floor(vim.o.lines * max) end
+    local min = math.min(10, max)
+    return math.max(min, math.min(max, content_lines or max))
+end
+
+--- @param content_lines integer|nil # lines it will show, to size the window to them
 --- @return integer # Mark-window's Buffer id
-function M.create_window()
+function M.create_window(content_lines)
     if vim.b.is_marks_window == true then vim.cmd('bwipeout!') end  -- Close existing quick window
-    vim.cmd('botright 10 new')  -- Create new window and jump to the buffer context
+    -- A scratch buffer from the start: other plugins' BufEnter hooks skip it (no git calls on every open)
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.cmd('botright ' .. M.window_height(content_lines) .. ' split')
+    vim.api.nvim_win_set_buf(0, bufnr)
     vim.b.is_marks_window = true
-    vim.opt_local.buftype = 'nofile'
-    vim.opt_local.filetype = 'markdown'
+    vim.bo[bufnr].filetype = 'nvim-marks'
+    -- Markdown highlighting (titles, `code`, **bold**, links) with treesitter: ~1.5ms, where `filetype=markdown`
+    -- loads vim's markdown + html + css syntax files on every open (~10ms). Without the parser, titles only.
+    if not pcall(vim.treesitter.start, bufnr, 'markdown') then
+        vim.api.nvim_buf_call(bufnr, function()
+            vim.cmd([[syntax match NvimMarksTitle /^#.*$/]])
+            vim.cmd([[highlight default link NvimMarksTitle Title]])
+        end)
+    end
     vim.cmd('mapclear <buffer>')
     vim.cmd('autocmd BufLeave,BufWinLeave,BufHidden <buffer> ++once  :bd!')
     vim.cmd('nnoremap <buffer> <silent> <nowait> q :bwipeout!<CR>')
     vim.cmd('nnoremap <buffer> <silent> <nowait> <ESC> :bwipeout!<CR>')
-    vim.cmd('nnoremap <buffer> <silent> <nowait> <C-c> :bwipeout!<CR>')
     vim.cmd('setlocal buftype=nofile bufhidden=wipe noswapfile nonumber norelativenumber nowrap nocursorline')
     return vim.api.nvim_get_current_buf()
 end
@@ -354,19 +511,23 @@ end
 --- @param edit_bufnr integer # editor-buffer's id
 --- @param target_bufnr integer|nil # target-buffer's id, nil for a note of a file that isn't open
 --- @param on_save function # called with the typed lines
---- @param from_write boolean|nil # called by `:w`/`:wq`/`:x`: close after the command, so its `q` still has a window
-function M.save_note(edit_bufnr, target_bufnr, on_save, from_write)
+function M.save_note(edit_bufnr, target_bufnr, on_save, _, on_delete)
     local text = vim.api.nvim_buf_get_lines(edit_bufnr, 0, -1, false)
-    if vim.trim(table.concat(text, '\n')) ~= '' then  -- Nothing typed: just close
+    if not utils.is_empty_note(text) then
         on_save(text)
+    elseif on_delete then
+        on_delete()  -- an existing note cleared to nothing (or only spaces) is deleted
+    end  -- a new note with nothing typed: just close
+    if target_bufnr then
+        utils.save_all(target_bufnr)  -- to the store right away, so other nvims and scripts see it
+        utils.refresh_sign_bar(target_bufnr)
     end
-    if target_bufnr then utils.refresh_sign_bar(target_bufnr) end
     vim.bo[edit_bufnr].modified = false
     local function close()
         if vim.api.nvim_buf_is_valid(edit_bufnr) then vim.api.nvim_buf_delete(edit_bufnr, {force=true}) end
         vim.cmd('stopinsert!')
     end
-    if from_write then vim.schedule(close) else close() end
+    close()
 end
 
 --- On buffer load, restore marks from persistent file
@@ -420,18 +581,40 @@ function M.start_auto_reload(interval_ms)
     end))
 end
 
+--- `:NvimMarksNoteToggle`: show or hide notes' text on their lines (the `*` signs stay). With `!`, hide.
+function M.toggleNoteText(hide)
+    local show = nil  -- flip
+    if hide then show = false end
+    local shown = utils.toggle_note_text(show)
+    vim.api.nvim_echo({{'nvim-marks: note text ' .. (shown and 'shown' or 'hidden'), 'Normal'}}, false, {})
+end
+
 --- @param opt table|nil # {dir=string} folder where marks are saved (see store.lua)
 ---                         {reload_interval=10} seconds between checks for changes from elsewhere, 0 turns it off
+---                         {height=0.4} panel max height: a share of the screen (< 1) or a number of lines; it fits its content up to that
 ---                         {note_style='inline'|'above'} notes at the end of the line (default) or on lines above it
 ---                         {note_prefix=string} before an inline note, default '    -- '
+---                         {show_note_text=false} start with notes' text hidden, only the `*` sign shows
 function M.setup(opt)
     opt = opt or {}
     if opt.note_style then utils.note_style = opt.note_style end
     if opt.note_prefix then utils.note_prefix = opt.note_prefix end
+    if opt.show_note_text ~= nil then utils.toggle_note_text(opt.show_note_text) end
     if opt.dir then require('nvim-marks.store').dir_option = opt.dir end
     if opt.reload_interval then M.start_auto_reload(opt.reload_interval * 1000) end
+    if opt.height then vim.g.nvim_marks_height = opt.height end
 end
 
 M.start_auto_reload((vim.g.nvim_marks_reload_interval or 10) * 1000)
+
+
+--- Tests: `nvim -l tests/run.lua`
+function M.test_fit()
+    local function eq(a, b, msg) assert(a == b, msg .. ': expected ' .. vim.inspect(b) .. ', got ' .. vim.inspect(a)) end
+    eq(fit('short', 8), 'short   ', 'padded')
+    eq(fit('exactly8', 8), 'exactly8', 'fits exactly')
+    eq(fit(string.rep('a', 500), 10), string.rep('a', 9) .. '…', 'long text cut with …')
+    eq(vim.fn.strdisplaywidth(fit('中文中文中文中文', 7)), 7, 'wide characters still fit the width')
+end
 
 return M

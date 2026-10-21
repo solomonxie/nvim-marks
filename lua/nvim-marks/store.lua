@@ -16,10 +16,47 @@ local M = {}
 M.DEFAULT_DIR = vim.fn.stdpath('data') .. '/nvim-marks'
 M.dir_option = nil  --- @type string|nil # set by setup()
 M.FILE_NAME = 'marks.jsonl'
+M.LOG_FILE_NAME = 'marks-log.jsonl'  -- next to the store: every add/update/delete, appended, never rewritten
 local OLD_FILE_NAME = 'marks-history.json'  -- previous format, read once when there's no marks.jsonl yet
-local KEY_ORDER = {'id', 'file', 'kind', 'char', 'text', 'row', 'line', 'above', 'below'}
+local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line', 'above', 'below'}
+
+--- A note's status, in the order `@` cycles through them and the marks list shows them
+M.STATUSES = {'open', 'todo', 'anchor', 'done'}
+--- Shown in front of a note (marks list, code line, editor bar); stored only as `status`, never in the text
+M.STATUS_SYMBOLS = {open='', todo='(⏺)', done='(ok)', anchor='(-)'}
+--- Statuses from earlier versions, read as their current name
+local OLD_STATUS = {answered='todo', archived='done', read='done'}
+--- Text prefixes the status replaces: `(⏺) ` todo, `(ok) ` done, `(-) ` anchor
+local PREFIX_STATUS = {['(⏺)']='todo', ['(ok)']='done', ['(-)']='anchor', ['(x)']='done'}
+
+--- Move a note's old text prefixes into `status`, removing them from the text (once, on read)
+--- Also renames statuses from earlier versions (`answered` is now `todo`, `archived` and `read` are `done`).
+---
+--- @return table # the same record
+function M.status_from_prefixes(record)
+    if record.status and OLD_STATUS[record.status] then record.status = OLD_STATUS[record.status] end
+    if record.kind ~= 'note' or record.status then return record end
+    local text = record.text
+    if type(text) ~= 'table' or #text == 0 then return record end
+    local first, status = text[1], nil
+    while true do
+        local tag, rest = first:match('^(%b())%s*(.*)$')
+        if not tag or not PREFIX_STATUS[tag] then break end
+        -- done wins over todo (`(ok) (⏺) ...` means done)
+        local s = PREFIX_STATUS[tag]
+        if status == nil or s == 'done' then status = s end
+        first = rest
+    end
+    if status then
+        record.text = vim.list_extend({first}, vim.list_slice(text, 2))
+        record.status = status
+    end
+    return record
+end
 
 local RepoCache = {}  --- @type table<string, table> # {dir={top, repo}}
+local KnownRoots = {}  --- @type table<string, table<string, boolean>> # {store_path={root=true}}: checkouts seen this session
+local WorktreeCache = {}  --- @type table<string, string[]> # {root={worktree root, ...}}
 
 --- @param path string # absolute file path
 --- @return table # {top=repo root or nil, repo=string}
@@ -54,12 +91,65 @@ end
 --- Work files kept under the marks folder (`<dir>/<repo>/...`) belong with that repo's marks
 ---
 --- @return table|nil # {top=<dir>/<repo>, repo=<repo>} when `path` is inside one
+--- @return string # the marks folder, resolved
+local function marks_dir()
+    return (vim.fn.resolve(vim.fn.expand(M.dir_option or vim.g.nvim_marks_dir or M.DEFAULT_DIR)):gsub('/$', ''))
+end
+
 function M.work_files_repo(path)
-    local dir = vim.fn.resolve(vim.fn.expand(M.dir_option or vim.g.nvim_marks_dir or M.DEFAULT_DIR)):gsub('/$', '')
+    local dir = marks_dir()
     if not vim.startswith(path, dir .. '/') then return nil end
     local repo = path:sub(#dir + 2):match('^([^/]+)/')
     if repo == nil or repo:match('^%.') then return nil end
     return {top=dir .. '/' .. repo, repo=repo}
+end
+
+--- Remember a checkout of a repo, so its files can be found from a buffer in another checkout or a work file
+function M.remember_root(store_path, root)
+    if not root then return end
+    KnownRoots[store_path] = KnownRoots[store_path] or {}
+    KnownRoots[store_path][root] = true
+end
+
+--- @return string[] # roots of every worktree of the git repo at `root` (empty when it isn't one)
+local function worktrees(root)
+    if WorktreeCache[root] then return WorktreeCache[root] end
+    local roots = {}
+    local obj = vim.system({'git', '-C', root, 'worktree', 'list', '--porcelain'}, {text=true}):wait()
+    if obj.code == 0 then
+        for _, line in ipairs(vim.split(obj.stdout, '\n')) do
+            local wt = line:match('^worktree (.+)')
+            if wt then table.insert(roots, vim.fn.resolve(wt)) end
+        end
+    end
+    WorktreeCache[root] = roots
+    return roots
+end
+
+--- Folders a repo's saved `file` paths can be relative to, best first: this buffer's checkout, the checkout
+--- nvim's cwd is in, other checkouts seen this session and every worktree of them, then the repo's work-files folder
+--- (notes on work files are relative to that). Paths aren't tied to the cwd or to one checkout.
+---
+--- @return string[]
+function M.candidate_roots(store_path, info)
+    local roots, seen = {}, {}
+    local function add(root)
+        if root and not seen[root] then
+            seen[root] = true
+            table.insert(roots, root)
+        end
+    end
+    add(info.top)
+    local cwd_info = M.repo_info(vim.fn.getcwd() .. '/.')
+    if cwd_info.top and M.store_path(cwd_info) == store_path then add(cwd_info.top) end
+    local known = vim.tbl_keys(KnownRoots[store_path] or {})
+    table.sort(known)
+    for _, root in ipairs(known) do add(root) end
+    for _, root in ipairs(vim.list_slice(roots)) do
+        for _, wt in ipairs(worktrees(root)) do add(wt) end
+    end
+    if info.repo ~= '_no_repo' then add(marks_dir() .. '/' .. info.repo) end
+    return roots
 end
 
 --- @return string # path from the repo root, or the absolute path outside a repo
@@ -77,8 +167,13 @@ function M.store_path(info)
 end
 
 --- @return string # a new record id
+local IdCounter = 0
+
+--- Unique even across nvim instances: `math.random()` starts from the same seed in every nvim, so mix in the
+--- process id, a counter and the clock instead
 function M.new_id()
-    return vim.fn.sha256(tostring(vim.uv.hrtime()) .. math.random()):sub(1, 8)
+    IdCounter = IdCounter + 1
+    return vim.fn.sha256(vim.fn.getpid() .. ':' .. IdCounter .. ':' .. vim.uv.hrtime()):sub(1, 8)
 end
 
 --- @return string # one JSON line, keys in a fixed order so a record's line only changes when its values do
@@ -97,6 +192,7 @@ function M.decode_record(json_line)
     local ok, record = pcall(vim.json.decode, json_line)
     if not ok or type(record) ~= 'table' or not record.id or not record.file then return nil end
     if type(record.text) == 'string' then record.text = vim.split(record.text, '\n', {plain=true}) end
+    M.status_from_prefixes(record)
     if record.line_b64 then  -- written briefly by an earlier version
         local decoded_ok, line = pcall(vim.base64.decode, record.line_b64)
         record.line = decoded_ok and line or ''
@@ -159,8 +255,60 @@ function M.mtime(store_path)
 end
 
 --- Write to a temp file then rename, so a crash or another nvim never leaves half a file
+--- @return string # the change log next to a store file
+function M.log_path(store_path)
+    return vim.fs.dirname(store_path) .. '/' .. M.LOG_FILE_NAME
+end
+
+--- Append one line per record that differs between `old` and `new` to the change log, with the whole record
+--- (`before` for update and delete, `after` for add and update), so any version can be put back by hand.
+---   {"ts":"2026-10-20T14:05:11.042+0000","op":"update","id":"3f9a1c0e","file":"src/a.lua","by":"nvim 12345",
+---    "before":{...record...},"after":{...record...}}
+--- Only content changes are logged: a record that only moved (row/anchor) is an `update` too, so nothing is lost.
+---
+--- @return integer # lines appended
+function M.append_log(store_path, old, new, by)
+    local old_by_id, new_by_id = {}, {}
+    for _, r in ipairs(old) do old_by_id[r.id] = r end
+    for _, r in ipairs(new) do new_by_id[r.id] = r end
+    local now = vim.uv.clock_gettime('realtime')
+    local ts = os.date('!%Y-%m-%dT%H:%M:%S', now.sec) .. string.format('.%03dZ', math.floor(now.nsec / 1e6))
+    local lines = {}
+    local function entry(op, before, after)
+        local r = after or before
+        local parts = {
+            '"ts":' .. vim.json.encode(ts), '"op":' .. vim.json.encode(op), '"id":' .. vim.json.encode(r.id),
+            '"file":' .. vim.json.encode(r.file), '"by":' .. vim.json.encode(by or ('nvim ' .. vim.fn.getpid())),
+        }
+        if before then table.insert(parts, '"before":' .. M.encode_record(before)) end
+        if after then table.insert(parts, '"after":' .. M.encode_record(after)) end
+        table.insert(lines, '{' .. table.concat(parts, ',') .. '}')
+    end
+    for _, r in ipairs(old) do
+        local n = new_by_id[r.id]
+        if not n then entry('delete', r, nil)
+        elseif M.encode_record(n) ~= M.encode_record(r) then entry('update', r, n) end
+    end
+    for _, r in ipairs(new) do
+        if not old_by_id[r.id] then entry('add', nil, r) end
+    end
+    if #lines == 0 then return 0 end
+    -- Opened in append mode: concurrent writers each add whole lines, nothing already there is touched
+    local f = io.open(M.log_path(store_path), 'a')
+    if not f then
+        vim.notify('nvim-marks: cannot write ' .. M.log_path(store_path), vim.log.levels.WARN)
+        return 0
+    end
+    f:write(table.concat(lines, '\n') .. '\n')
+    f:close()
+    return #lines
+end
+
 function M.save(store_path, records)
     vim.fn.mkdir(vim.fs.dirname(store_path), 'p')
+    -- Log what this write changes compared with what's on disk right now (other writers' changes were logged by them)
+    local on_disk = vim.uv.fs_stat(store_path) and M.load(store_path) or {}
+    M.append_log(store_path, on_disk, records)
     local tmp_path = store_path .. '.tmp' .. vim.fn.getpid()
     local f = io.open(tmp_path, 'w')
     if not f then
@@ -180,21 +328,35 @@ end
 --- A note whose text this nvim hasn't changed since loading it keeps the text on disk, so an edit made elsewhere
 --- (another nvim, a script) isn't reverted by a save here.
 ---
+--- A record in `current` that this nvim has seen on disk before (`on_disk`) but that's gone now was deleted
+--- elsewhere (an agent, another nvim): it's dropped, not written back, unless its text was edited here.
+---
 --- @param known table<string, boolean> # ids this nvim loaded or created for the file
+--- The same goes for a note's status: one this nvim didn't change since loading keeps the status on disk.
+---
 --- @param loaded_texts table<string, string[]>|nil # {id=text} of notes as this nvim last loaded or saved them
+--- @param on_disk table<string, boolean>|nil # ids this nvim has loaded from or saved to the store
+--- @param loaded_statuses table<string, string|false>|nil # {id=status} as last loaded or saved (false: none)
 --- @return table[], boolean # merged records, whether anything changed
-function M.merge_file(records, file, current, known, loaded_texts)
+function M.merge_file(records, file, current, known, loaded_texts, on_disk, loaded_statuses)
     local by_id = {}
     for _, record in ipairs(current) do by_id[record.id] = record end
     local merged, changed, seen = {}, false, {}
     for _, record in ipairs(records) do
         if record.file ~= file then
             table.insert(merged, record)
+        elseif record.kind == 'note' and vim.trim(table.concat(record.text or {}, '\n')) == '' then
+            changed = true  -- an empty note counts as deleted: drop it from the file
         elseif by_id[record.id] then
             local new = by_id[record.id]
             local loaded = loaded_texts and loaded_texts[record.id]
             if new.kind == 'note' and loaded and vim.deep_equal(new.text, loaded) then
                 new = vim.tbl_extend('force', new, {text=record.text})  -- not edited here: keep theirs
+            end
+            local loaded_status = loaded_statuses and loaded_statuses[record.id]
+            if new.kind == 'note' and loaded_status ~= nil and (new.status or false) == loaded_status then
+                new = vim.deepcopy(new)
+                new.status = record.status  -- not changed here: keep theirs
             end
             if M.encode_record(new) ~= M.encode_record(record) then changed = true end
             table.insert(merged, new)
@@ -206,7 +368,10 @@ function M.merge_file(records, file, current, known, loaded_texts)
         end
     end
     for _, record in ipairs(current) do
-        if not seen[record.id] then
+        local loaded = loaded_texts and loaded_texts[record.id]
+        local edited_here = record.kind == 'note' and loaded and not vim.deep_equal(record.text, loaded)
+        local deleted_elsewhere = on_disk and on_disk[record.id] and not edited_here
+        if not seen[record.id] and not deleted_elsewhere then
             table.insert(merged, record)
             changed = true
         end
@@ -214,12 +379,17 @@ function M.merge_file(records, file, current, known, loaded_texts)
     return merged, changed
 end
 
---- Change a record's text, or delete it (text=nil)
-function M.edit_record(store_path, id, text)
+--- Change a record's text and/or status, or delete it (text=nil and no status)
+function M.edit_record(store_path, id, text, status)
     local records = M.load(store_path)
     for i, record in ipairs(records) do
         if record.id == id then
-            if text then record.text = text else table.remove(records, i) end
+            if text or status then
+                if text then record.text = text end
+                if status then record.status = status end
+            else
+                table.remove(records, i)
+            end
             M.save(store_path, records)
             return
         end
@@ -313,6 +483,11 @@ function M.test_merge_file_keeps_places()
     -- note 3 was added by another nvim after this one loaded the file: not deleted
     local kept = M.merge_file(records, 'jobs/common.py', {records[1]}, {[records[1].id]=true})
     eq(#kept, 3, 'record added elsewhere is kept')
+    -- note 3 was deleted by an agent after this nvim loaded it: not written back
+    local on_disk_now = {records[1], records[2]}
+    local after = M.merge_file(on_disk_now, 'jobs/common.py', {records[1], records[3]}, known,
+                               {[records[3].id]=records[3].text}, {[records[1].id]=true, [records[3].id]=true})
+    eq(#after, 2, 'record deleted elsewhere stays deleted')
 end
 
 --- A note edited elsewhere while this nvim had it open is kept, unless this nvim edited it too
@@ -337,6 +512,50 @@ function M.test_convert_old_json()
     eq({records[1].kind, records[1].text, records[1].row}, {'note', {'one', 'two'}, 2}, 'note')
     eq({records[2].file, records[2].kind, records[2].char}, {'a.lua', 'mark', 'b'}, 'orphan mark')
     eq(#records[2].above, 1, 'v2 context lines turned into hashes')
+end
+
+function M.test_new_id_unique()
+    local seen = {}
+    for _ = 1, 2000 do
+        local id = M.new_id()
+        assert(not seen[id], 'duplicate id ' .. id)
+        seen[id] = true
+    end
+end
+
+function M.test_append_log()
+    local tmp_dir = vim.fn.tempname()
+    local store_path = tmp_dir .. '/' .. M.FILE_NAME
+    local a = {id='aaaa0001', file='src/a.lua', kind='note', text={'why?'}, row=3, line='x = 1', above={}, below={}}
+    local b = {id='bbbb0002', file='src/a.lua', kind='mark', char='a', row=5, line='y = 2', above={}, below={}}
+    M.save(store_path, {a, b})
+    local a2 = vim.deepcopy(a)
+    a2.status = 'todo'
+    a2.text = {'why?', '--', 'Bot reply:', 'because'}
+    M.save(store_path, {a2})  -- a updated, b deleted
+    M.save(store_path, {a2})  -- no change: nothing logged
+    local log = vim.tbl_map(vim.json.decode, vim.fn.readfile(M.log_path(store_path)))
+    eq(vim.tbl_map(function(e) return e.op .. ' ' .. e.id end, log), {'add aaaa0001', 'add bbbb0002', 'update aaaa0001', 'delete bbbb0002'}, 'one line per change')
+    eq(log[3].before.text, 'why?', 'update keeps the old text')
+    eq(log[3].after.text, 'why?\n--\nBot reply:\nbecause', 'and the new text')
+    eq(log[3].after.status, 'todo', 'and the new status')
+    eq(log[4].before.char, 'a', 'delete keeps the whole record')
+    eq(log[1].ts:match('^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$') ~= nil, true, 'UTC timestamp with ms')
+    vim.fn.delete(tmp_dir, 'rf')
+end
+
+function M.test_status_from_prefixes()
+    local function conv(text) return M.status_from_prefixes({kind='note', text=text}) end
+    eq(conv({'(⏺) why?', '--', 'Bot reply:'}), {kind='note', status='todo', text={'why?', '--', 'Bot reply:'}}, 'todo')
+    eq(conv({'(ok) what is it?'}), {kind='note', status='done', text={'what is it?'}}, 'ok = done')
+    eq(conv({'(-) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'anchor')
+    eq(conv({'(ok) (⏺) why?'}), {kind='note', status='done', text={'why?'}}, 'done wins over todo')
+    eq(M.status_from_prefixes({kind='note', status='read', text={'x'}}).status, 'done', 'old read status renamed')
+    eq(M.status_from_prefixes({kind='note', status='answered', text={'x'}}).status, 'todo', 'old answered status renamed')
+    eq(M.status_from_prefixes({kind='note', status='archived', text={'x'}}).status, 'done', 'old archived status renamed')
+    eq(conv({'(note) not a status'}), {kind='note', text={'(note) not a status'}}, 'unknown tag left in the text')
+    eq(conv({'plain'}), {kind='note', text={'plain'}}, 'no prefix: no status (open)')
+    eq(M.status_from_prefixes({kind='note', status='open', text={'(⏺) x'}}).text, {'(⏺) x'}, 'has a status already: untouched')
 end
 
 return M

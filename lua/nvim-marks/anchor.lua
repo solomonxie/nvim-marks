@@ -2,7 +2,7 @@
 ---
 --- Each mark/note keeps an anchor: its row, the line's text, and short hashes of the 2 lines above and below.
 --- On restore:
---- 1. The saved row still has the same text: done.
+--- 1. The saved row still has the same text, and the lines around it still match: done.
 --- 2. Otherwise search lines with the same text: the best matching surroundings win, then the closest row.
 --- 3. Otherwise fuzzy-match the text (surroundings must match too) near the saved row.
 --- 4. Otherwise nil: the caller keeps it as an orphan instead of dropping it.
@@ -89,7 +89,12 @@ function M.locate(anchor, lines, hashes)
     hashes = hashes or {}
     local target = norm(anchor.line)
     local expected = anchor.row
-    if lines[expected] and norm(lines[expected]) == target and (target ~= '' or context_score(anchor, lines, expected, hashes) >= 0.5) then
+    -- Same text at the saved row and all its surroundings match: done. Otherwise the same line may also exist
+    -- elsewhere (e.g. a copied block after a `git pull`), so the search below picks the best fit; the saved row
+    -- is one of the candidates and wins ties
+    local has_context = #(anchor.above or {}) + #(anchor.below or {}) > 0
+    if lines[expected] and norm(lines[expected]) == target and target ~= ''
+        and (not has_context or context_score(anchor, lines, expected, hashes) == 1) then
         return expected
     end
     -- Same text: best context, then the closest to the saved row
@@ -164,6 +169,17 @@ function M.test_locate()
     eq(M.locate(M.make(old, 20), new, hashes), 23, 'other duplicate resolved by context')
     -- `print('saving', path)` became `print('saving file', path)` in v2
     eq(M.locate(M.make(old, 10), new, hashes), 13, 'edited line found by fuzzy match')
+end
+
+function M.test_locate_copied_block()
+    -- After a pull, the noted line exists twice: the old row now holds the copy, the original moved down
+    local old = {'def orders():', '    x = 1', '    result = run(', '        trigger=Now(),', '    )', '', 'def creative():'}
+    local new = {'def orders():', '    x = 1', '    result = run(', '        trigger=Now(),', '    )', '',
+                 'def creative():', '    y = 2', '    result = run(', '        trigger=Now(),', '    )'}
+    -- saved on creative's `result = run(` (row 3 in a file where creative came first)
+    local saved = M.make({'def creative():', '    y = 2', '    result = run(', '        trigger=Now(),', '    )'}, 3)
+    eq(M.locate(saved, new), 9, 'surroundings pick the right copy, not the old row')
+    eq(M.locate(M.make(old, 3), new), 3, 'a note that was on the first copy stays there')
 end
 
 function M.test_locate_orphan()

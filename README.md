@@ -117,9 +117,13 @@ Or in Vimscript: `let g:nvim_marks_dir = '~/notes/marks'`.
 
 Files kept inside that folder, under a repo's name (e.g. your own notes in `~/notes/marks/myapp/plan.md`), are treated as part of that repo: their notes go into `~/notes/marks/myapp/marks.jsonl` with the repo's code notes.
 
+The marks window is as tall as its content, from 10 lines up to 40% of the screen height. Change the max with `setup({ height = 0.5 })` or a number of lines, `setup({ height = 25 })` (or `let g:nvim_marks_height = 25`).
+
 The marks file is checked every 10 seconds for changes made elsewhere (another nvim, e.g. in another worktree, or a `git pull`), and open files' notes are reloaded. Change it with `setup({ reload_interval = 30 })` or `let g:nvim_marks_reload_interval = 30`; `0` turns it off. A save only removes notes this nvim deleted, never ones added elsewhere that it hasn't loaded yet.
 
-Notes show at the end of their line, like `local x = 1    -- check this`; a multi-line note is joined with ` | `. To show them on their own lines above instead: `setup({ note_style = 'above' })` (or `let g:nvim_marks_note_style = 'above'`). Change the `    -- ` before an inline note with `note_prefix`.
+Each note has a status: open (new notes, listed under **Notes**), `(⏺)` **TODO**, `(ok)` **DONE** (shown in gray), or `(-)` **Anchors** (just a label on the line). The symbol is shown in front of the note in the list, on its code line and in the editor's top bar; it isn't part of the saved text. The marks window lists notes in one section per status: Notes, TODO, Anchors, then DONE at the bottom. Press `@` on a note (in the list, or in the note editor) to move it to the next status (Notes → TODO → Anchors → DONE → Notes); the list redraws with the note in its new section and the cursor still on it, so pressing `@` again keeps cycling the same note. DONE notes are dimmed in the list. If a note's text starts with one of these symbols (from earlier versions, or typed by hand), it's turned into that status and removed from the text.
+
+Notes show at the end of their line, like `local x = 1    -- check this`; a multi-line note is shown on one line, its lines joined by spaces. `:NvimMarksNoteToggle` hides or shows the text on every line (the `*` sign stays, and the notes are still in the panel); `:NvimMarksNoteToggle!` always hides. To start hidden: `setup({ show_note_text = false })` or `let g:nvim_marks_show_note_text = 0`. To show them on their own lines above instead: `setup({ note_style = 'above' })` (or `let g:nvim_marks_note_style = 'above'`). Change the `    -- ` before an inline note with `note_prefix`.
 
 
 ## 🔧 How It Works
@@ -168,6 +172,14 @@ One JSONL file per repo holds every file's marks and notes, one line each, keyed
 ```
 
 A note's `text` is one string (its lines joined with `\n`). New marks and notes are appended; one that's edited or moved rewrites only its own line; a deleted one removes its line. So the file works well in git: every change is a one-line diff. Saving merges into the file (only the current file's lines change), so several nvim instances in different worktrees don't overwrite each other. A `marks-history.json` from the previous format is converted the first time it's read, and left in place.
+
+Every add, update and delete is also appended to `marks-log.jsonl` next to it, with a UTC timestamp, who made it (`nvim <pid>` or another tool), and the whole record before and after, so a note can always be found and put back:
+
+```json
+{"ts":"2026-10-20T21:25:17.498Z","op":"update","id":"65532050","file":"src/a.lua","by":"nvim 14830","before":{...},"after":{...}}
+```
+
+The log is only ever appended to.
 
 ### Performance Considerations
 
