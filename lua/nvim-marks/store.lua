@@ -23,11 +23,11 @@ local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line'
 --- A note's status, in the order `@` cycles through them and the marks list shows them
 M.STATUSES = {'open', 'todo', 'anchor', 'done'}
 --- Shown in front of a note (marks list, code line, editor bar); stored only as `status`, never in the text
-M.STATUS_SYMBOLS = {open='', todo='(⏺)', done='(ok)', anchor='(-)'}
+M.STATUS_SYMBOLS = {open='', todo='(⏺)', done='(ok)', anchor='(#)'}
 --- Statuses from earlier versions, read as their current name
 local OLD_STATUS = {answered='todo', archived='done', read='done'}
---- Text prefixes the status replaces: `(⏺) ` todo, `(ok) ` done, `(-) ` anchor
-local PREFIX_STATUS = {['(⏺)']='todo', ['(ok)']='done', ['(-)']='anchor', ['(x)']='done'}
+--- Text prefixes the status replaces: `(⏺) ` todo, `(ok) ` done, `(#) ` anchor (`(-)` was anchor's earlier symbol)
+local PREFIX_STATUS = {['(⏺)']='todo', ['(ok)']='done', ['(#)']='anchor', ['(-)']='anchor', ['(x)']='done'}
 
 --- Move a note's old text prefixes into `status`, removing them from the text (once, on read)
 --- Also renames statuses from earlier versions (`answered` is now `todo`, `archived` and `read` are `done`).
@@ -548,7 +548,8 @@ function M.test_status_from_prefixes()
     local function conv(text) return M.status_from_prefixes({kind='note', text=text}) end
     eq(conv({'(⏺) why?', '--', 'Bot reply:'}), {kind='note', status='todo', text={'why?', '--', 'Bot reply:'}}, 'todo')
     eq(conv({'(ok) what is it?'}), {kind='note', status='done', text={'what is it?'}}, 'ok = done')
-    eq(conv({'(-) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'anchor')
+    eq(conv({'(#) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'anchor')
+    eq(conv({'(-) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'old anchor symbol')
     eq(conv({'(ok) (⏺) why?'}), {kind='note', status='done', text={'why?'}}, 'done wins over todo')
     eq(M.status_from_prefixes({kind='note', status='read', text={'x'}}).status, 'done', 'old read status renamed')
     eq(M.status_from_prefixes({kind='note', status='answered', text={'x'}}).status, 'todo', 'old answered status renamed')
