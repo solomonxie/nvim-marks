@@ -114,7 +114,9 @@ function M.locate(anchor, lines, hashes)
     -- Edited line: fuzzy text + exact context, near the saved row only
     best, best_score = nil, M.FUZZY_THRESHOLD
     for row = math.max(1, expected - M.FUZZY_WINDOW), math.min(#lines, expected + M.FUZZY_WINDOW) do
-        local score = 0.6 * M.similarity(target, norm(lines[row])) + 0.4 * context_score(anchor, lines, row, hashes)
+        -- With no surrounding-line hashes (e.g. a hand-written tour step) only the text can be compared
+        local score = has_context and (0.6 * M.similarity(target, norm(lines[row])) + 0.4 * context_score(anchor, lines, row, hashes))
+                      or M.similarity(target, norm(lines[row]))
         if score > best_score then
             best, best_score = row, score
         end
@@ -180,6 +182,13 @@ function M.test_locate_copied_block()
     local saved = M.make({'def creative():', '    y = 2', '    result = run(', '        trigger=Now(),', '    )'}, 3)
     eq(M.locate(saved, new), 9, 'surroundings pick the right copy, not the old row')
     eq(M.locate(M.make(old, 3), new), 3, 'a note that was on the first copy stays there')
+end
+
+function M.test_locate_without_context()
+    local new = read_fixture('v2.lua')
+    -- a hand-written anchor (no hashes) on a line that was edited: `print('saving', path)` → `print('saving file', path)`
+    eq(M.locate({row=10, line="    print('saving', path)", above={}, below={}}, new), 13, 'edited line found by text alone')
+    eq(M.locate({row=10, line='something that is nowhere', above={}, below={}}, new), nil, 'no match: nil')
 end
 
 function M.test_locate_orphan()

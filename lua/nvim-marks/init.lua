@@ -178,7 +178,7 @@ function M.openMarks(opt)
     local filename = utils.display_name(vim.api.nvim_buf_get_name(target_bufnr))
     -- Prepare content
     local content_lines = {''}  -- a blank first line: margin under the hint bar
-    local hint = 'Help: A-Z (not G N) add mark | + add note | ' .. EditKey .. ' edit note | @ next status | - delete (y/n) | <CR> jump | q quit'
+    local hint = 'Help: A-Z (not G N) add mark | + add note | ' .. EditKey .. ' edit note | @ next status | - delete (y/n) | <CR> jump / start tour | q quit'
     local previews = {}  -- {window_row: text}, appended in gray after each item
     -- Render marks
     local marks_metadata = {}
@@ -258,6 +258,17 @@ function M.openMarks(opt)
                 marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = 'note' })
                 if status == 'done' then dimmed[#content_lines] = true end
             end
+        end
+    end
+    -- Render tours (guided marks) found in the repo's tours folder; <CR> on one starts guided mode
+    local tours = require('nvim-marks.tour').list(vim.fs.dirname(store_path))
+    if #tours > 0 then
+        section('# Tours (' .. #tours .. ')')
+        for _, t in ipairs(tours) do
+            local label = t.error and ('(!) ' .. t.name) or (t.name .. ' (' .. t.steps_count .. ' steps)')
+            table.insert(content_lines, '  ' .. label)
+            previews[#content_lines] = t.error or t.description or ''
+            marks_metadata[#content_lines] = {type='tour', path=t.path, error=t.error}
         end
     end
     -- Render orphans: saved marks/notes whose line isn't in this version of the file (e.g. another branch)
@@ -371,6 +382,15 @@ function M.openMarks(opt)
     -- Key: Jump to mark/note
     vim.keymap.set('n', '<CR>', function()
         local mark = M.get_mark_at_cursor()
+        if mark and mark.type == 'tour' then
+            if mark.error then
+                vim.api.nvim_echo({{'nvim-marks: ' .. mark.error, 'ErrorMsg'}}, false, {})
+                return
+            end
+            vim.cmd('bwipeout!')  -- back in the code window, then guided mode opens its own panel
+            require('nvim-marks.guided').start(mark.path, target_bufnr, function(n) return M.create_window(n, true) end)
+            return
+        end
         if mark and mark.type == 'orphan' then
             vim.api.nvim_echo({{'Not found in this version of the file', 'WarningMsg'}}, false, {})
         elseif mark then
@@ -481,8 +501,9 @@ function M.window_height(content_lines)
 end
 
 --- @param content_lines integer|nil # lines it will show, to size the window to them
+--- @param keep boolean|nil # stay open when the cursor leaves it (guided mode); default closes on leave
 --- @return integer # Mark-window's Buffer id
-function M.create_window(content_lines)
+function M.create_window(content_lines, keep)
     if vim.b.is_marks_window == true then vim.cmd('bwipeout!') end  -- Close existing quick window
     -- A scratch buffer from the start: other plugins' BufEnter hooks skip it (no git calls on every open)
     local bufnr = vim.api.nvim_create_buf(false, true)
@@ -499,7 +520,7 @@ function M.create_window(content_lines)
         end)
     end
     vim.cmd('mapclear <buffer>')
-    vim.cmd('autocmd BufLeave,BufWinLeave,BufHidden <buffer> ++once  :bd!')
+    if not keep then vim.cmd('autocmd BufLeave,BufWinLeave,BufHidden <buffer> ++once  :bd!') end
     vim.cmd('nnoremap <buffer> <silent> <nowait> q :bwipeout!<CR>')
     vim.cmd('nnoremap <buffer> <silent> <nowait> <ESC> :bwipeout!<CR>')
     vim.cmd('setlocal buftype=nofile bufhidden=wipe noswapfile nonumber norelativenumber nowrap nocursorline')

@@ -1,0 +1,6 @@
+{"tour":"Save flow","description":"How a save goes from load to encode, in v1.lua","root":"s1"}
+{"id":"s1","title":"module table","file":"v1.lua","row":1,"line":"local M = {}","text":"Everything hangs off `M`.","children":["s2","s3"]}
+{"id":"s2","title":"encode","file":"v1.lua","row":5,"line":"local function encode(data)","text":"JSON encoder used by save.","children":["s4"]}
+{"id":"s3","title":"save","file":"v1.lua","row":8,"line":"local function save(data)","text":"Gets the path, prints it, encodes.","children":["s4","s5"]}
+{"id":"s4","title":"vim.json.encode","file":"v1.lua","row":6,"line":"    return vim.json.encode(data)","text":"The actual encoding, shared by encode and save."}
+{"id":"s5","title":"print path","file":"v1.lua","row":10,"line":"    print('saving', path)","text":"Debug print, worth removing."}

@@ -105,6 +105,32 @@ m
 " mA  " Jump to global mark 'A'
 ```
 
+## 🧭 Guided marks (tours)
+
+A tour walks you through code step by step, like a website tutorial. Put tour files in `<dir>/<repo>/tours/*.jsonl` (next to `marks.jsonl`, shared by every worktree). The marks window lists them under `# Tours`; `<CR>` on one starts guided mode.
+
+In guided mode the panel shows the tour as a tree with `▶` on the current step and the step's explanation below; the code window above opens each step's file at its line and highlights it. Keys in the panel: `n` next, `p` previous, `<CR>` jump to the step under the cursor, `q` / `Ctrl-c` / `Esc` leave. You can move to the code window to read around and come back.
+
+The walk is depth-first, and after a leaf it walks back up one step at a time (shown as "back to it") instead of jumping to the next branch, ending back at the root:
+
+```
+A ─┬─ B ─┬─ D        n:  A → B → D → B → E → B → A → C → A (end of tour)
+   │     └─ E
+   └─ C
+```
+
+A step can have several parents (a DAG); reached again through another parent it's shown as "seen already" and its children aren't walked twice. Cycles are rejected.
+
+Format: line 1 is a header, then one step per line:
+
+```json
+{"tour":"Save flow","description":"How a save goes from load to encode","root":"s1"}
+{"id":"s1","title":"module table","file":"src/store.lua","row":1,"line":"local M = {}","text":"Everything hangs off `M`.","children":["s2","s3"]}
+{"id":"s2","title":"encode","file":"src/store.lua","row":5,"line":"local function encode(data)","text":"JSON encoder used by save."}
+```
+
+`file` is the path from the repo root; `row` and `line` (the exact code) find the step's line again after edits, like a note. `text` is the explanation (markdown, `\n` for new lines). The plugin only reads tours: write them by hand, or have an LLM write one.
+
 ## ⚙️ Configuration
 
 Works out of the box. Marks are saved to `<dir>/<repo>/marks.jsonl`, one file per repo shared by all its worktrees. `<dir>` defaults to `stdpath('data')/nvim-marks` (e.g. `~/.local/share/nvim/nvim-marks/myapp/marks.jsonl`).
