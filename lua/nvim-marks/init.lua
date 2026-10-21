@@ -73,7 +73,7 @@ function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete,
     -- (a virtual line above line 1 hides as soon as the view scrolls past it)
     local function show_hint()
         -- q and < save the note as they leave (there's no separate save key); - and @ only exist for saved notes
-        local hint = 'Help: q quit | < return to main menu'
+        local hint = 'Help: q quit | Backspace return to main menu'
         if on_delete then hint = hint .. ' | - delete this note' end
         if status_ops then
             local status = status_ops.get()
@@ -104,7 +104,7 @@ function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete,
     vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI', 'WinScrolled', 'TextChanged', 'TextChangedI'}, {buffer=edit_bufnr, callback=show_margin})
     on_save = on_save or function(text) utils.set_note(target_bufnr, target_row, text) end
     -- Key: save, then back to the marks list, opened for the file and line the editor was opened from
-    vim.keymap.set('n', '<', function()
+    vim.keymap.set('n', '<BS>', function()
         local origin = MenuOrigin
         M.save_note(edit_bufnr, target_bufnr, on_save, false, on_delete)
         if origin and vim.api.nvim_win_is_valid(origin.win) and vim.api.nvim_buf_is_valid(origin.bufnr) then
