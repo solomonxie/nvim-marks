@@ -14,14 +14,15 @@ local utils = require('nvim-marks.utils')
 
 local IsBufferSetup = {}
 local NS_Preview = vim.api.nvim_create_namespace('nvim-marks.preview')
-local EditKey = 'e'  -- edits the note under the cursor in the menu
-local PanelMarkChars = 'ABCDEFHIJKLMOPQRSTUVWXYZ'  -- capitals set a mark from the menu; lowercase keys (and G, N) keep their normal meaning there
+local EditKey = 'o'  -- edits the note under the cursor in the menu
+local PanelMarkChars = 'ABCDEFHIJKLMOPQRSTUVWXYZ'  -- capitals set a mark from the menu; other lowercase keys (and G, N) keep their normal meaning there
 local NoteWidth = 80  -- notes column in the menu is as wide as the longest note, up to this; longer ones are cut with `…`
 local PathWidthMax = 50  -- the path column is as wide as the longest path, up to this
 local MenuOrigin = nil  -- {win, bufnr, row} the marks list was last opened from, for `[` in the editor to go back to
 local StatusTitles = {open='Notes', todo='TODO', done='DONE', anchor='Anchors'}
 local SectionOrder = {'open', 'todo', 'anchor', 'done'}  -- list sections top to bottom (same as the `@` cycle)
 local MarksMetadata = {}  -- {win_bufnr: {row: metadata}}, kept in Lua since vim.b turns sparse tables into lists
+local Peek = nil  -- {win, bufnr, view, opened, keep}: the code window showing the menu item under the cursor, see peek()
 
 
 --- Cut or pad a string to exactly `width` display columns, `…` where it was cut
@@ -57,6 +58,51 @@ local function note_tail(location, path_width, line_text)
     local tail = ' >> ' .. fit(location, path_width)
     if line_text ~= '' then tail = tail .. '  "' .. line_text:sub(1, 80) .. '"' end
     return tail
+end
+
+
+--- Show the menu item under the cursor in the code window the menu was opened from, at its line. The same window
+--- is reused for every item; files are opened with :edit (ordinary buffers). A file the preview opened is closed
+--- when it moves to another file, so there's one at a time; files you had open are left alone.
+local function peek(item)
+    if not (Peek and item and vim.api.nvim_win_is_valid(Peek.win)) then return end
+    local bufnr, path = nil, nil
+    if item.type == 'mark' then
+        bufnr = Peek.bufnr
+    elseif item.type == 'global' then
+        path = item.path
+    elseif item.type == 'note' then
+        bufnr = item.bufnr
+        if not bufnr and item.exists ~= false then path = item.path end
+    end
+    if not (path or (bufnr and vim.api.nvim_buf_is_valid(bufnr))) then return end
+    local opened
+    bufnr, opened = utils.show_in_window(Peek.win, path or bufnr)
+    if not bufnr then return end
+    if Peek.opened and Peek.opened ~= bufnr then utils.close_preview_buffer(Peek.opened) end
+    if opened then Peek.opened = bufnr elseif Peek.opened ~= bufnr then Peek.opened = nil end
+    local row = item.row
+    if item.type == 'note' then row = M.find_note_row(bufnr, item) end
+    row = math.max(1, math.min(row, vim.api.nvim_buf_line_count(bufnr)))
+    vim.api.nvim_win_set_cursor(Peek.win, {row, 0})
+    vim.api.nvim_win_call(Peek.win, function() vim.cmd('normal! zz') end)
+end
+
+--- The menu closed: put the code window back on the file and view it had, and close the file the preview opened,
+--- unless <CR> jumped to the item shown (then it stays open).
+local function end_peek()
+    if not Peek then return end
+    local state = Peek
+    Peek = nil
+    if state.keep then return end
+    -- Scheduled: the menu closes from inside autocmds, where the file's own BufEnter hooks wouldn't run
+    vim.schedule(function()
+        if vim.api.nvim_win_is_valid(state.win) and vim.api.nvim_buf_is_valid(state.bufnr) then
+            utils.show_in_window(state.win, state.bufnr)
+            vim.api.nvim_win_call(state.win, function() vim.fn.winrestview(state.view) end)
+        end
+        utils.close_preview_buffer(state.opened)
+    end)
 end
 
 
@@ -178,7 +224,7 @@ function M.openMarks(opt)
     local filename = utils.display_name(vim.api.nvim_buf_get_name(target_bufnr))
     -- Prepare content
     local content_lines = {''}  -- a blank first line: margin under the hint bar
-    local hint = 'Help: A-Z (not G N) add mark | + add note | ' .. EditKey .. ' edit note | @ next status | - delete (y/n) | <CR> jump / start tour | q quit'
+    local hint = 'Help: A-Z (not G N) add mark | a add note | ' .. EditKey .. ' open note / tour | @ next status | - delete (y/n) | <Enter> jump | q quit'
     local previews = {}  -- {window_row: text}, appended in gray after each item
     -- Render marks
     local marks_metadata = {}
@@ -246,7 +292,21 @@ function M.openMarks(opt)
     local number_width = #tostring(#notes)
     local dimmed = {}  -- {window_row=true}: done rows, drawn all in gray
     local i = 0
+    -- Tours (guided marks) found in the repo's tours folder; <CR> on one starts guided mode. Listed above Anchors.
+    local function render_tours()
+        local tours = require('nvim-marks.tour').list(vim.fs.dirname(store_path))
+        if #tours == 0 then return end
+        section('# Tours (' .. #tours .. ')')
+        for _, t in ipairs(tours) do
+            local label = t.error and ('(!) ' .. t.name) or (t.name .. ' (' .. t.steps_count .. ' steps)')
+            table.insert(content_lines, '  ' .. label)
+            previews[#content_lines] = t.error or t.description or ''
+            marks_metadata[#content_lines] = {type='tour', path=t.path, error=t.error}
+        end
+    end
+    local tours_rendered = false
     for _, status in ipairs(SectionOrder) do
+        if status == 'anchor' then render_tours(); tours_rendered = true end
         local group = vim.tbl_filter(function(note) return note.status == status end, notes)
         if #group > 0 then
             section('# ' .. StatusTitles[status] .. ' (' .. #group .. ')')
@@ -260,17 +320,7 @@ function M.openMarks(opt)
             end
         end
     end
-    -- Render tours (guided marks) found in the repo's tours folder; <CR> on one starts guided mode
-    local tours = require('nvim-marks.tour').list(vim.fs.dirname(store_path))
-    if #tours > 0 then
-        section('# Tours (' .. #tours .. ')')
-        for _, t in ipairs(tours) do
-            local label = t.error and ('(!) ' .. t.name) or (t.name .. ' (' .. t.steps_count .. ' steps)')
-            table.insert(content_lines, '  ' .. label)
-            previews[#content_lines] = t.error or t.description or ''
-            marks_metadata[#content_lines] = {type='tour', path=t.path, error=t.error}
-        end
-    end
+    if not tours_rendered then render_tours() end
     -- Render orphans: saved marks/notes whose line isn't in this version of the file (e.g. another branch)
     local orphans = utils.Orphans[target_bufnr] or {}
     if #orphans ~= 0 then
@@ -340,6 +390,32 @@ function M.openMarks(opt)
     local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
     local top = math.max(1, cursor_row - vim.api.nvim_win_get_height(0) + 1)
     vim.fn.winrestview({topline=top, lnum=cursor_row, col=0})
+    -- Show the item under the cursor in the code window as the cursor moves; closing the menu puts it back
+    local origin_win = MenuOrigin.win
+    Peek = {win=origin_win, bufnr=target_bufnr, view=vim.api.nvim_win_call(origin_win, vim.fn.winsaveview)}
+    local peeked_row = nil
+    local function peek_cursor()
+        local row = vim.api.nvim_win_get_cursor(0)[1]
+        if row == peeked_row then return end
+        peeked_row = row
+        -- Scheduled: CursorMoved isn't nested, so a file opened inside it wouldn't get its BufRead/BufEnter hooks
+        vim.schedule(function()
+            if vim.api.nvim_buf_is_valid(win_bufnr) and peeked_row == row then peek(marks_metadata[row]) end
+        end)
+    end
+    vim.api.nvim_create_autocmd('CursorMoved', {buffer=win_bufnr, callback=peek_cursor})
+    vim.api.nvim_create_autocmd('BufUnload', {buffer=win_bufnr, once=true, callback=end_peek})
+    -- Left for another window: the menu closes from inside an autocmd, so BufUnload above doesn't run;
+    -- keep what the code window shows, as you went to look at it
+    vim.api.nvim_create_autocmd('BufLeave', {buffer=win_bufnr, once=true, callback=function()
+        vim.schedule(function()
+            if Peek and not vim.api.nvim_buf_is_valid(win_bufnr) then
+                Peek.keep = true
+                end_peek()
+            end
+        end)
+    end})
+    peek_cursor()
     -- Key: any letter adds that mark, except the menu's own keys
     local opts = { buffer = win_bufnr, silent = true, nowait = true }
     for char in PanelMarkChars:gmatch('.') do
@@ -351,7 +427,7 @@ function M.openMarks(opt)
         end, opts)
     end
     -- Key: Add a note, or edit the one already on this line
-    vim.keymap.set('n', '+', function()
+    vim.keymap.set('n', 'a', function()
         for _, note in ipairs(notes) do
             if note.bufnr == target_bufnr and note.row == target_row then return M.edit_note(note) end
         end
@@ -370,30 +446,34 @@ function M.openMarks(opt)
         M.openMarks({focus=mark})
         vim.api.nvim_echo({{'Status: ' .. StatusTitles[status], 'Normal'}}, false, {})
     end, opts)
-    -- Key: Edit the note under the cursor
+    -- Start the tour under the cursor in guided mode
+    local function start_tour(mark)
+        if mark.error then
+            vim.api.nvim_echo({{'nvim-marks: ' .. mark.error, 'ErrorMsg'}}, false, {})
+            return
+        end
+        vim.cmd('bwipeout!')  -- back in the code window, then guided mode opens its own panel
+        require('nvim-marks.tour_panel').start(mark.path, target_bufnr, function(n) return M.create_window(n, true) end)
+    end
+    -- Key: Edit the note under the cursor, or start the tour under it (like <CR>)
     vim.keymap.set('n', EditKey, function()
         local mark = M.get_mark_at_cursor()
         if mark and mark.type == 'note' then
             M.edit_note(mark)
+        elseif mark and mark.type == 'tour' then
+            start_tour(mark)
         else
-            vim.api.nvim_echo({{'Not on a note', 'WarningMsg'}}, false, {})
+            vim.api.nvim_echo({{'Not on a note or tour', 'WarningMsg'}}, false, {})
         end
     end, opts)
     -- Key: Jump to mark/note
     vim.keymap.set('n', '<CR>', function()
         local mark = M.get_mark_at_cursor()
-        if mark and mark.type == 'tour' then
-            if mark.error then
-                vim.api.nvim_echo({{'nvim-marks: ' .. mark.error, 'ErrorMsg'}}, false, {})
-                return
-            end
-            vim.cmd('bwipeout!')  -- back in the code window, then guided mode opens its own panel
-            require('nvim-marks.guided').start(mark.path, target_bufnr, function(n) return M.create_window(n, true) end)
-            return
-        end
+        if mark and mark.type == 'tour' then return start_tour(mark) end
         if mark and mark.type == 'orphan' then
             vim.api.nvim_echo({{'Not found in this version of the file', 'WarningMsg'}}, false, {})
         elseif mark then
+            if Peek then Peek.keep = true end  -- the code window already shows it, keep it there
             vim.cmd('bwipeout!')
             if mark.type == 'global' then
                 vim.cmd('edit ' .. vim.fn.fnameescape(mark.path))
@@ -466,12 +546,16 @@ function M.jump_to_note(note)
         vim.cmd('edit ' .. vim.fn.fnameescape(note.path))
     end
     local bufnr = vim.api.nvim_get_current_buf()
-    local row = note.row
+    vim.api.nvim_win_set_cursor(0, {math.min(M.find_note_row(bufnr, note), vim.api.nvim_buf_line_count(bufnr)), 0})
+end
+
+--- @return integer # the note's row in the buffer now, its saved row if it's not found there
+function M.find_note_row(bufnr, note)
     for _, item in ipairs(utils.scan_notes(bufnr)) do
         local id, item_row, text = unpack(item)
-        if id == note.extmark_id or vim.deep_equal(text, note.text) then row = item_row; break end
+        if id == note.extmark_id or vim.deep_equal(text, note.text) then return item_row end
     end
-    vim.api.nvim_win_set_cursor(0, {math.min(row, vim.api.nvim_buf_line_count(bufnr)), 0})
+    return note.row
 end
 
 --- Ask y/n, anything but y/Y is no

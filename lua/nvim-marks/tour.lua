@@ -1,27 +1,39 @@
 --- Guided marks ("tours"): a DAG of steps through code, walked with n / p in the marks panel.
+--- This file is the format only (load, check, tree order, listing); tour_panel.lua is the UI that walks it.
 ---
---- Files: <g:nvim_marks_dir>/<repo>/tours/*.jsonl, one tour per file. Line 1 is the header, then one step per line:
----   {"tour":"Save flow","description":"...","root":"s1"}
----   {"id":"s1","title":"...","file":"src/a.lua","row":12,"line":"<exact code>","text":"explanation","children":["s2"]}
+--- Files: <g:nvim_marks_dir>/<repo>/tours-<slug>.jsonl, next to marks.jsonl, one tour per file. One step per line,
+--- every line the same shape; the root step, written first, also carries the tour's name and description:
+---   {"id":"s1","tour":"Save flow","description":"...","title":"...","file":"src/a.lua","row":12,"line":"<exact code>","text":"explanation","children":["s2"]}
+---   {"id":"s2","title":"...","file":"src/b.lua","row":40,"line":"<exact code>","text":"explanation"}
+--- A file is a tour when its first line has a "tour" key; marks.jsonl and marks-log.jsonl never do.
 --- `file`, `row` and `line` are an anchor like a note's (see anchor.lua), so a step finds its line after edits and in
---- any worktree. A step may have several parents. The plugin only reads tours; people or the code-walkthrough
---- skill write them.
+--- any worktree; an optional `commit` (HEAD when the step was written) finds a line that was rewritten. A step may
+--- have several parents. The plugin only reads tours; people or the code-walkthrough skill write them.
+--- (Earlier tours had a header line `{"tour":..., "description":..., "root":"s1"}` instead; still read.)
 ---
---- Walk order: depth-first, and after a leaf it walks back up one step at a time instead of jumping to the next
---- branch, ending back at the root:  A─┬─B─┬─D  →  A B D B E B A C A
----                                     │   └─E
----                                     └─C
---- A step reached again through another parent is shown, but its children aren't walked again.
+--- Walk order: the tree's order, depth-first, each step once (`n` goes down the numbered rows of the panel).
+--- A step with several parents is shown once, under the first parent that reaches it.
 
 local M = {}
 
-M.DIR_NAME = 'tours'
+--- Files in the repo's store folder that are never tours
+local NOT_TOURS = {['marks.jsonl']=true, ['marks-log.jsonl']=true}
+
+--- @return boolean # the file's first line has a "tour" key (the root step)
+local function starts_with_root(path)
+    local f = io.open(path, 'r')
+    if not f then return false end
+    local first = f:read('*l')
+    f:close()
+    local ok, header = pcall(vim.json.decode, first or '')
+    return ok and type(header) == 'table' and header.tour ~= nil
+end
 
 --- @return table|nil, string|nil # tour {name, description, root, steps={id=step}, order={ids}, path}, or nil and an error
 function M.load(path)
     local f = io.open(path, 'r')
     if not f then return nil, 'cannot read ' .. path end
-    local header, steps, order = nil, {}, {}
+    local root_step, header, steps, order = nil, nil, {}, {}
     local n = 0
     for line in f:lines() do
         n = n + 1
@@ -31,12 +43,15 @@ function M.load(path)
                 f:close()
                 return nil, string.format('%s:%d: not valid JSON', path, n)
             end
-            if header == nil then
-                if not record.tour then f:close(); return nil, path .. ':1: first line must be the header ({"tour": ...})' end
-                header = record
+            if not record.id and record.tour and n == 1 then
+                header = record  -- earlier format: a header line before the steps
             else
                 if not record.id then f:close(); return nil, string.format('%s:%d: step without an id', path, n) end
                 if steps[record.id] then f:close(); return nil, string.format('%s:%d: duplicate id %s', path, n, record.id) end
+                if record.tour then
+                    if root_step then f:close(); return nil, string.format('%s:%d: a second root step ("tour" key)', path, n) end
+                    root_step = record
+                end
                 record.children = record.children or {}
                 steps[record.id] = record
                 table.insert(order, record.id)
@@ -44,9 +59,15 @@ function M.load(path)
         end
     end
     f:close()
-    if header == nil then return nil, path .. ': empty' end
-    local root = header.root or order[1]
-    if not steps[root] then return nil, path .. ': root step ' .. tostring(root) .. ' not found' end
+    local root
+    if header then
+        root = header.root or order[1]
+        if not steps[root] then return nil, path .. ': root step ' .. tostring(root) .. ' not found' end
+    elseif root_step then
+        header, root = root_step, root_step.id
+    else
+        return nil, path .. ': no root step (the step with a "tour" key)'
+    end
     for _, id in ipairs(order) do
         for _, child in ipairs(steps[id].children) do
             if not steps[child] then return nil, string.format('%s: step %s has unknown child %s', path, id, child) end
@@ -84,27 +105,6 @@ function M.find_cycle(steps, root)
     return visit(root)
 end
 
---- Every step of the walk, in order
----
---- @return table[] # [{id, depth, back=true when returning to a step already shown, seen=true for a repeat via another parent}]
-function M.walk(tour)
-    local walk, expanded = {}, {}
-    local function visit(id, depth)
-        if expanded[id] then
-            table.insert(walk, {id=id, depth=depth, seen=true})
-            return
-        end
-        expanded[id] = true
-        table.insert(walk, {id=id, depth=depth})
-        for _, child in ipairs(tour.steps[id].children) do
-            visit(child, depth + 1)
-            table.insert(walk, {id=id, depth=depth, back=true})  -- unwind one step after each child
-        end
-    end
-    visit(tour.root, 0)
-    return walk
-end
-
 --- The tree as shown in the panel: each step once, in first-seen order, with its depth
 ---
 --- @return table[] # [{id, depth, shared=true when it has more than one parent}]
@@ -123,15 +123,46 @@ function M.tree(tour)
     return rows
 end
 
---- @return table[] # every tour in the repo's tours folder, sorted by name: [{name, description, path, steps_count}]
+--- The order `n` walks: depth-first, and after each child it walks back up to the parent before the next child,
+--- ending back at the root:  A─┬─B─┬─D  →  A B D B E B A C A
+---                             │   └─E
+---                             └─C
+--- Walking back isn't a new step: each stop carries the index of its row in M.tree(tour) (`row`), and `back=true`
+--- when it revisits a step.
+---
+--- @return table[] # [{row, back}] where row indexes the list M.tree(tour) returns
+function M.walk(tour, tree)
+    tree = tree or M.tree(tour)
+    local row_of = {}
+    for i, r in ipairs(tree) do row_of[r.id] = row_of[r.id] or i end
+    local walk, expanded = {}, {}
+    local function visit(id)
+        expanded[id] = true
+        table.insert(walk, {row=row_of[id]})
+        for _, child in ipairs(tour.steps[id].children) do
+            if not expanded[child] then  -- a shared step is walked under its first parent only, like the tree
+                visit(child)
+                table.insert(walk, {row=row_of[id], back=true})
+            end
+        end
+    end
+    visit(tour.root)
+    return walk
+end
+
+--- Tour files sit next to marks.jsonl. A `tours-*.jsonl` file always counts (so a broken one shows its error);
+--- any other `.jsonl` counts only if its first line is a root step (has a "tour" key). Backups and temp files (`*.bak*`, `*.tmp*`)
+--- end in something else, so they're skipped.
+---
+--- @return table[] # every tour in the repo's store folder, sorted by name: [{name, description, path, steps_count}]
 ---                   plus [{path, error}] for files that didn't load, so the menu can say what's wrong
 function M.list(store_dir)
-    local dir = store_dir .. '/' .. M.DIR_NAME
     local tours = {}
-    if vim.fn.isdirectory(dir) == 0 then return tours end
-    for name, kind in vim.fs.dir(dir) do
-        if kind == 'file' and name:match('%.jsonl$') then
-            local path = dir .. '/' .. name
+    if vim.fn.isdirectory(store_dir) == 0 then return tours end
+    for name, kind in vim.fs.dir(store_dir) do
+        local path = store_dir .. '/' .. name
+        if kind == 'file' and name:match('%.jsonl$') and not NOT_TOURS[name]
+            and (name:match('^tours%-') or starts_with_root(path)) then
             local tour, err = M.load(path)
             if tour then
                 table.insert(tours, {name=tour.name, description=tour.description, path=path, steps_count=#tour.order})
@@ -160,24 +191,30 @@ function M.test_load()
     eq(tour.root, 's1', 'root')
     eq(#tour.order, 5, 'steps')
     eq(tour.steps.s3.children, {'s4', 's5'}, 'children')
-end
-
-function M.test_walk_unwinds_and_skips_shared_children()
-    local tour = assert(M.load(fixture_path('tours/save-flow.jsonl')))
-    local function show(w)
-        local tag = w.back and '<' or (w.seen and '=' or '')
-        return tag .. w.id
-    end
-    -- s1 ─┬─ s2 ── s4          s4 has two parents: shown again under s3 as seen, not walked twice
-    --     └─ s3 ─┬─ s4
-    --            └─ s5
-    eq(vim.tbl_map(show, M.walk(tour)), {'s1', 's2', 's4', '<s2', '<s1', 's3', '=s4', '<s3', 's5', '<s3', '<s1'}, 'walk order')
+    -- earlier format, a header line before the steps
+    local tmp = vim.fn.tempname() .. '.jsonl'
+    vim.fn.writefile({'{"tour":"Old","description":"d","root":"b"}', '{"id":"a"}', '{"id":"b","children":["a"]}'}, tmp)
+    local old = assert(M.load(tmp))
+    eq({old.name, old.description, old.root, #old.order}, {'Old', 'd', 'b', 2}, 'header line still read')
+    vim.fn.delete(tmp)
 end
 
 function M.test_tree()
     local tour = assert(M.load(fixture_path('tours/save-flow.jsonl')))
     eq(vim.tbl_map(function(r) return string.rep(' ', r.depth) .. r.id .. (r.shared and '*' or '') end, M.tree(tour)),
        {'s1', ' s2', '  s4*', ' s3', '  s5'}, 'each step once, shared marked')
+end
+
+function M.test_walk()
+    local tour = assert(M.load(fixture_path('tours/save-flow.jsonl')))
+    local tree = M.tree(tour)
+    local walk = M.walk(tour, tree)
+    eq(vim.tbl_map(function(s) return tree[s.row].id .. (s.back and '<' or '') end, walk),
+       {'s1', 's2', 's4', 's2<', 's1<', 's3', 's5', 's3<', 's1<'}, 'walks back up after each child, shared step once')
+    -- the step number is the tree row, so walking back never goes past the number of steps
+    local max_row = 0
+    for _, s in ipairs(walk) do max_row = math.max(max_row, s.row) end
+    eq(max_row, #tree, 'step numbers stay within 1..N')
 end
 
 function M.test_rejects_bad_tours()
@@ -187,24 +224,40 @@ function M.test_rejects_bad_tours()
         local tour, err = M.load(tmp)
         assert(tour == nil and err and err:find(want, 1, true), 'expected error with "' .. want .. '", got ' .. tostring(err))
     end
-    check({'{"tour":"t","root":"a"}', '{"id":"a","children":["b"]}', '{"id":"b","children":["a"]}'}, 'cycle through a → b → a')
-    check({'{"tour":"t","root":"a"}', '{"id":"a","children":["zz"]}'}, 'unknown child zz')
-    check({'{"id":"a"}'}, 'first line must be the header')
+    check({'{"id":"a","tour":"t","children":["b"]}', '{"id":"b","children":["a"]}'}, 'cycle through a → b → a')
+    check({'{"id":"a","tour":"t","children":["zz"]}'}, 'unknown child zz')
+    check({'{"id":"a"}'}, 'no root step')
+    check({'{"id":"a","tour":"t"}', '{"id":"b","tour":"u"}'}, 'a second root step')
     check({'{"tour":"t","root":"nope"}', '{"id":"a"}'}, 'root step nope not found')
-    check({'{"tour":"t"}', '{"id":"a"}', '{"id":"a"}'}, 'duplicate id a')
+    check({'{"id":"a","tour":"t"}', '{"id":"a"}'}, 'duplicate id a')
     vim.fn.delete(tmp)
 end
 
 function M.test_list()
     local dir = vim.fn.tempname()
-    vim.fn.mkdir(dir .. '/tours', 'p')
-    vim.fn.writefile(vim.fn.readfile(fixture_path('tours/save-flow.jsonl')), dir .. '/tours/save-flow.jsonl')
-    vim.fn.writefile({'not json'}, dir .. '/tours/broken.jsonl')
+    vim.fn.mkdir(dir, 'p')
+    vim.fn.writefile(vim.fn.readfile(fixture_path('tours/save-flow.jsonl')), dir .. '/tours-save-flow.jsonl')
+    vim.fn.writefile({'not json'}, dir .. '/tours-broken.jsonl')
     local tours = M.list(dir)
-    eq(#tours, 2, 'both files listed')
+    eq(#tours, 2, 'both tour files listed')
     local ok = vim.tbl_filter(function(t) return not t.error end, tours)[1]
     eq({ok.name, ok.steps_count}, {'Save flow', 5}, 'good tour')
     eq(vim.tbl_filter(function(t) return t.error end, tours)[1].error:find('not valid JSON', 1, true) ~= nil, true, 'broken one says why')
+    vim.fn.delete(dir, 'rf')
+end
+
+--- Tours sit next to the marks store: only the tour is listed, not marks.jsonl, marks-log.jsonl or a backup
+function M.test_list_skips_marks_files()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    vim.fn.writefile({'{"id":"a1","file":"x.lua","kind":"note","text":"q","row":1,"line":"x"}'}, dir .. '/marks.jsonl')
+    vim.fn.writefile({'{"ts":"2026-10-21T00:00:00Z","op":"add","id":"a1","file":"x.lua"}'}, dir .. '/marks-log.jsonl')
+    vim.fn.writefile({'{"id":"a1"}'}, dir .. '/marks.jsonl.bak-20261021')
+    vim.fn.writefile(vim.fn.readfile(fixture_path('tours/save-flow.jsonl')), dir .. '/tours-save-flow.jsonl')
+    vim.fn.writefile(vim.fn.readfile(fixture_path('tours/save-flow.jsonl')), dir .. '/my-walk.jsonl')
+    local names = vim.tbl_map(function(t) return vim.fs.basename(t.path) end, M.list(dir))
+    table.sort(names)
+    eq(names, {'my-walk.jsonl', 'tours-save-flow.jsonl'}, 'tours only, by name or by header')
     vim.fn.delete(dir, 'rf')
 end
 

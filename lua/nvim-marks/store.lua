@@ -10,6 +10,8 @@
 ---   {"id":"b71d22aa","file":"src/a.lua","kind":"mark","char":"a","row":8,"line":"local x = 1","above":[...],"below":[...]}
 --- `text` is the note, its lines joined with `\n`. `row`, `line`, `above`, `below` are the anchor (see anchor.lua). A record whose line can't be found in the current
 --- version of the file (e.g. on another branch) is left as it is until it's found again or deleted.
+--- `commit` is HEAD (12 characters) when the anchor was last written: when the anchor isn't found, the row is carried
+--- through the diff from that commit's version of the file, and a renamed file is followed (see utils.lua).
 
 local M = {}
 
@@ -18,7 +20,8 @@ M.dir_option = nil  --- @type string|nil # set by setup()
 M.FILE_NAME = 'marks.jsonl'
 M.LOG_FILE_NAME = 'marks-log.jsonl'  -- next to the store: every add/update/delete, appended, never rewritten
 local OLD_FILE_NAME = 'marks-history.json'  -- previous format, read once when there's no marks.jsonl yet
-local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line', 'above', 'below'}
+local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line', 'above', 'below', 'commit'}
+M.COMMIT_LEN = 12  -- git lengthens its own short hashes as a repo grows, 7 can turn ambiguous
 
 --- A note's status, in the order `@` cycles through them and the marks list shows them
 M.STATUSES = {'open', 'todo', 'anchor', 'done'}
@@ -150,6 +153,70 @@ function M.candidate_roots(store_path, info)
     end
     if info.repo ~= '_no_repo' then add(marks_dir() .. '/' .. info.repo) end
     return roots
+end
+
+local HeadCache = {}  --- @type table<string, table> # {top={commit, at}}: HEAD, read again after HEAD_TTL_NS
+local HEAD_TTL_NS = 2e9
+local FileAtCommit = {}  --- @type table<string, string[]|false> # {'top|commit|file'=lines}, a commit never changes
+local RenameCache = {}  --- @type table<string, table> # {'top|commit|head'={old path=new path}}
+
+--- @param top string|nil # repo root
+--- @return string|nil # HEAD, short; nil outside a git repo (e.g. work files), or before the first commit
+function M.head_commit(top)
+    if not top then return nil end
+    local now = vim.uv.hrtime()
+    local cached = HeadCache[top]
+    if cached and now - cached.at < HEAD_TTL_NS then return cached.commit or nil end
+    local obj = vim.system({'git', '-C', top, 'rev-parse', '--show-toplevel', 'HEAD'}, {text=true}):wait()
+    local commit = false
+    if obj.code == 0 then
+        local toplevel, head = unpack(vim.split(vim.trim(obj.stdout), '\n'))
+        -- A folder inside another repo (the work-files folder in a dotfiles repo): paths aren't from that repo's root
+        if vim.fn.resolve(toplevel) == vim.fn.resolve(top) and head then commit = head:sub(1, M.COMMIT_LEN) end
+    end
+    HeadCache[top] = {commit=commit, at=now}
+    return commit or nil
+end
+
+--- @return string[]|nil # the file's lines at `commit`, nil when the commit is gone (rebased away) or hadn't the file
+function M.file_at_commit(top, commit, file)
+    local key = top .. '|' .. commit .. '|' .. file
+    if FileAtCommit[key] == nil then
+        local obj = vim.system({'git', '-C', top, 'show', commit .. ':' .. file}, {text=true}):wait()
+        FileAtCommit[key] = obj.code == 0 and vim.split(obj.stdout:gsub('\n$', ''), '\n', {plain=true}) or false
+    end
+    return FileAtCommit[key] or nil
+end
+
+local AncestorCache = {}  --- @type table<string, boolean> # {'top|commit|head'=is ancestor}
+
+--- @return boolean # `commit` is in HEAD's history. A note saved on another branch isn't: its line may still be there,
+---                   so it stays an orphan instead of being moved by a diff against an unrelated version
+function M.is_ancestor(top, commit)
+    local head = M.head_commit(top)
+    if not head then return false end
+    local key = top .. '|' .. commit .. '|' .. head
+    if AncestorCache[key] == nil then
+        local obj = vim.system({'git', '-C', top, 'merge-base', '--is-ancestor', commit, 'HEAD'}):wait()
+        AncestorCache[key] = obj.code == 0
+    end
+    return AncestorCache[key]
+end
+
+--- @return table<string, string> # {old path=new path} for files renamed since `commit`, up to the working tree
+function M.renames_since(top, commit)
+    local key = top .. '|' .. commit .. '|' .. (M.head_commit(top) or '')
+    if RenameCache[key] then return RenameCache[key] end
+    local renames = {}
+    local obj = vim.system({'git', '-C', top, 'diff', '-M', '--name-status', '--diff-filter=R', commit, '--'}, {text=true}):wait()
+    if obj.code == 0 then
+        for _, line in ipairs(vim.split(obj.stdout, '\n')) do
+            local old, new = line:match('^R%d*\t([^\t]+)\t([^\t]+)$')
+            if old then renames[old] = new end
+        end
+    end
+    RenameCache[key] = renames
+    return renames
 end
 
 --- @return string # path from the repo root, or the absolute path outside a repo
@@ -343,7 +410,11 @@ function M.merge_file(records, file, current, known, loaded_texts, on_disk, load
     for _, record in ipairs(current) do by_id[record.id] = record end
     local merged, changed, seen = {}, false, {}
     for _, record in ipairs(records) do
-        if record.file ~= file then
+        if record.file ~= file and by_id[record.id] then
+            table.insert(merged, by_id[record.id])  -- its file was renamed to this one: moved here, same place
+            seen[record.id] = true
+            changed = true
+        elseif record.file ~= file then
             table.insert(merged, record)
         elseif record.kind == 'note' and vim.trim(table.concat(record.text or {}, '\n')) == '' then
             changed = true  -- an empty note counts as deleted: drop it from the file
@@ -352,6 +423,10 @@ function M.merge_file(records, file, current, known, loaded_texts, on_disk, load
             local loaded = loaded_texts and loaded_texts[record.id]
             if new.kind == 'note' and loaded and vim.deep_equal(new.text, loaded) then
                 new = vim.tbl_extend('force', new, {text=record.text})  -- not edited here: keep theirs
+            end
+            if record.commit and new.row == record.row and new.line == record.line
+                and vim.deep_equal(new.above, record.above) and vim.deep_equal(new.below, record.below) then
+                new = vim.tbl_extend('force', new, {commit=record.commit})  -- same anchor: keep the commit it was taken at
             end
             local loaded_status = loaded_statuses and loaded_statuses[record.id]
             if new.kind == 'note' and loaded_status ~= nil and (new.status or false) == loaded_status then

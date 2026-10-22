@@ -124,6 +124,34 @@ function M.locate(anchor, lines, hashes)
     return best
 end
 
+--- Carry a row of `old` over to `new` through their diff: shifted by the lines added or removed above it, and on
+--- a changed line, to the line that replaced it
+---
+--- @return integer|nil # row in `new`, nil when its line was deleted
+function M.map_row(old, new, row)
+    local diff = vim.text.diff or vim.diff  -- vim.diff before nvim 0.12
+    local hunks = diff(table.concat(old, '\n') .. '\n', table.concat(new, '\n') .. '\n', {result_type='indices'})
+    local shift = 0
+    for _, h in ipairs(hunks) do
+        local old_start, old_count, new_start, new_count = unpack(h)
+        if old_count == 0 then old_start = old_start + 1 end  -- pure insert: `old_start` is the line it goes after
+        if new_count == 0 then new_start = new_start + 1 end
+        if row < old_start then break end
+        if row < old_start + old_count then
+            if new_count == 0 then return nil end
+            -- The hunk's new line most like it (a blank line added next to a rewritten one doesn't win)
+            local best, best_score = new_start + math.min(row - old_start, new_count - 1), -1
+            for r = new_start, new_start + new_count - 1 do
+                local score = M.similarity(norm(old[row]), norm(new[r]))
+                if score > best_score then best, best_score = r, score end
+            end
+            return best
+        end
+        shift = shift + new_count - old_count
+    end
+    return row + shift
+end
+
 --- Convert an anchor saved by v2 (`before`/`after` holding full lines) to hashes
 function M.upgrade(anchor)
     if anchor.above == nil and (anchor.before or anchor.after) then
@@ -195,6 +223,15 @@ function M.test_locate_orphan()
     local old, new = read_fixture('v1.lua'), read_fixture('v2.lua')
     -- `local DEBUG = os.getenv('DEBUG')` was deleted in v2
     eq(M.locate(M.make(old, 3), new), nil, 'deleted line is an orphan')
+end
+
+function M.test_map_row()
+    local old, new = read_fixture('v1.lua'), read_fixture('v3.lua')
+    -- v3 adds 2 comment lines at the top, deletes `local DEBUG = ...` and rewrites `local function save(data)`
+    eq(M.map_row(old, new, 8), 9, 'rewritten line: the line that replaced it')
+    eq(M.map_row(old, new, 14), 15, 'unchanged line below: shifted')
+    eq(M.map_row(old, new, 3), nil, 'deleted line: nil')
+    eq(M.locate(M.make(old, 8), new), nil, 'the anchor alone loses the rewritten line')
 end
 
 function M.test_upgrade_v2_anchor()
