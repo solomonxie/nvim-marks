@@ -1,6 +1,7 @@
 --- Tour panel (guided mode): the UI that walks a tour step by step; tour.lua reads and checks the tour file.
---- Walk a tour step by step, in the order of its tree (each step once). At the top of the panel, as virtual lines:
---- the tour's name and description, then the tree with ▶ on the current step, then the step's explanation. The code window above puts its cursor on each step's line.
+--- Walk a tour step by step, in the order of its tree (each step once). The panel shows the tour's name and
+--- description (virtual lines on top) and the tree with ▶ on the current step. The code window above puts its cursor
+--- on each step's line, with the step's explanation as virtual lines above it.
 --- Keys in the panel: n next, p previous, <CR> jump to the step under the cursor, Backspace back to the marks menu,
 --- q / Ctrl-c leave.
 
@@ -27,8 +28,9 @@ local function locate(step)
     return path, row or step.row or 1
 end
 
---- Show the step in the code window: its file (with filetype/syntax, like :edit), cursor on its line, centered, and a
---- green ▶ in the sign column on that line (the line itself isn't highlighted, the cursor line shows it).
+--- Show the step in the code window: its file (with filetype/syntax, like :edit), cursor on its line, centered, a
+--- green ▶ in the sign column on that line (the line itself isn't highlighted, the cursor line shows it), and the
+--- step's explanation as virtual lines above it, gone when the tour moves on.
 --- The tour reuses that one window; each file is opened with :edit (an ordinary buffer). A file the tour opened is
 --- closed when it moves to another file, so there's one at a time; files you had open are left alone.
 local function show_code(step)
@@ -46,17 +48,38 @@ local function show_code(step)
         if vim.api.nvim_buf_is_valid(b) then vim.api.nvim_buf_clear_namespace(b, NS_Sign, 0, -1) end
     end
     row = math.min(row, vim.api.nvim_buf_line_count(bufnr))
-    vim.api.nvim_win_set_cursor(State.code_win, {row, 0})
-    vim.api.nvim_win_call(State.code_win, function() vim.cmd('normal! zz') end)
     vim.api.nvim_buf_set_extmark(bufnr, NS_Sign, row - 1, 0, {sign_text='▶', sign_hl_group='DiagnosticOk',
         priority=10000})  -- above the default 4096 of a note's `*`, a mark's letter and git signs: it wins the sign column
+    -- The explanation above the line between two rules, indented like the code, wrapped to the window's width
+    local virt_lines = {}
+    if vim.trim(step.text or '') ~= '' then
+        local indent = vim.api.nvim_buf_call(bufnr, function() return vim.fn.indent(row) end)
+        local width = math.max(20, vim.api.nvim_win_get_width(State.code_win) - vim.fn.getwininfo(State.code_win)[1].textoff - indent - 1)
+        local pad = {string.rep(' ', indent), 'Normal'}
+        local title = '--- Guided tour: Current step explanation ---'
+        table.insert(virt_lines, {pad, {title, 'Comment'}})
+        for _, l in ipairs(vim.split(vim.trim(step.text), '\n', {plain=true})) do
+            for _, wrapped in ipairs(M.wrap_chunks({{l, 'Comment'}}, width)) do  -- all gray, `code` left as typed
+                table.insert(virt_lines, vim.list_extend({pad}, wrapped))
+            end
+        end
+        table.insert(virt_lines, {pad, {string.rep('-', vim.fn.strdisplaywidth(title)), 'Comment'}})  -- as wide as the title
+        vim.api.nvim_buf_set_extmark(bufnr, NS_Sign, row - 1, 0, {virt_lines=virt_lines, virt_lines_above=true})
+    end
+    vim.api.nvim_win_set_cursor(State.code_win, {row, 0})
+    vim.api.nvim_win_call(State.code_win, function()
+        vim.cmd('normal! zz')
+        -- on the window's top line, lines above it only show when the view asks for them (topfill)
+        local view = vim.fn.winsaveview()
+        if view.topline == row then vim.fn.winrestview({topline=row, topfill=#virt_lines}) end
+    end)
 end
 
 --- Split a line of text into chunks: `code` spans (backticks dropped) highlighted like markdown inline code, the
 --- rest in `hl`
 ---
 --- @return table[] # [{text, hl_group}]
-local function text_chunks(line, hl)
+function M.text_chunks(line, hl)
     local chunks, rest = {}, line
     while true do
         local before, code, after = rest:match('^(.-)`([^`]+)`(.*)$')
@@ -110,9 +133,8 @@ local function heading_hl()
     return 'NvimMarksTourHeading'
 end
 
---- The tour's name and description above the tree as virtual lines, and the current step's explanation for the
---- float at the bottom (State.footer, chunks per screen line), wrapped to the panel's width (redrawn when it's resized). nvim draws lines above line 1
---- only when the view asks for them (topfill), see header_in_view.
+--- The tour's name and description above the tree as virtual lines, wrapped to the panel's width (redrawn when it's
+--- resized). nvim draws lines above line 1 only when the view asks for them (topfill), see header_in_view.
 local function show_header()
     local buf = State.panel_buf
     vim.api.nvim_buf_clear_namespace(buf, NS_Header, 0, -1)
@@ -127,15 +149,10 @@ local function show_header()
     local name = {{State.tour.name, heading}}
     if State.pos == #State.walk then table.insert(name, {'  · end of tour', 'Comment'}) end
     add(name)
-    if State.tour.description ~= '' then add(text_chunks(State.tour.description, 'Comment')) end
+    if State.tour.description ~= '' then add(M.text_chunks(State.tour.description, 'Comment')) end
     table.insert(virt_lines, {{'', 'Normal'}})
     vim.api.nvim_buf_set_extmark(buf, NS_Header, 0, 0, {virt_lines=virt_lines, virt_lines_above=true})
     State.header_height = #virt_lines
-    -- Pinned over the bottom of the panel (see show_footer), so a long tree can't push it out of view
-    local step = State.tour.steps[State.tree[State.walk[State.pos].row].id]
-    virt_lines = {{{'', 'Normal'}}, {{'Current step explanation:', heading}}}  -- the step itself is the ▶ row
-    for _, l in ipairs(vim.split(vim.trim(step.text or ''), '\n', {plain=true})) do add(text_chunks(l, 'Comment')) end
-    State.footer = virt_lines
 end
 
 --- Fit the panel's height to what it shows now (name, tree, this step's explanation), within the max height, so
@@ -143,48 +160,9 @@ end
 local function fit_height()
     local win = vim.fn.bufwinid(State.panel_buf)
     if win == -1 then return end
-    local wanted = State.header_height + #State.tree + #State.footer
+    local wanted = State.header_height + #State.tree
     vim.api.nvim_win_set_height(win, require('nvim-marks').window_height(wanted))
 end
-
---- The explanation in a float over the bottom of the panel, always in view; the tree ends in as many blank lines,
---- so its last rows can scroll above the float
-local function show_footer()
-    local panel_win = vim.fn.bufwinid(State.panel_buf)
-    if panel_win == -1 then return end
-    if not (State.float_buf and vim.api.nvim_buf_is_valid(State.float_buf)) then
-        State.float_buf = vim.api.nvim_create_buf(false, true)
-    end
-    local text = vim.tbl_map(function(chunks) return table.concat(vim.tbl_map(function(c) return c[1] end, chunks)) end, State.footer)
-    vim.api.nvim_buf_set_lines(State.float_buf, 0, -1, false, text)
-    vim.api.nvim_buf_clear_namespace(State.float_buf, NS, 0, -1)
-    for i, chunks in ipairs(State.footer) do
-        local col = 0
-        for _, c in ipairs(chunks) do
-            vim.api.nvim_buf_set_extmark(State.float_buf, NS, i - 1, col, {end_col=col + #c[1], hl_group=c[2]})
-            col = col + #c[1]
-        end
-    end
-    local panel_height = vim.api.nvim_win_get_height(panel_win)
-    State.footer_height = math.max(1, math.min(#text, panel_height - 1))
-    local config = {relative='win', win=panel_win, row=panel_height - State.footer_height, col=0, focusable=false,
-                    height=State.footer_height, width=vim.api.nvim_win_get_width(panel_win), style='minimal'}
-    if State.float_win and vim.api.nvim_win_is_valid(State.float_win) then
-        vim.api.nvim_win_set_config(State.float_win, config)
-    else
-        State.float_win = vim.api.nvim_open_win(State.float_buf, false, config)
-        vim.wo[State.float_win].winhighlight = 'NormalFloat:Normal'  -- the panel's background, no box
-    end
-end
-
---- Keep the cursor on the tree and its row above the float (scroll the view down when it would be under it)
-local function cursor_above_footer()
-    if not (State and State.footer_height) or vim.api.nvim_get_current_buf() ~= State.panel_buf then return end
-    if vim.api.nvim_win_get_cursor(0)[1] > #State.tree then vim.api.nvim_win_set_cursor(0, {#State.tree, 0}) end
-    local over = vim.fn.winline() - (vim.api.nvim_win_get_height(0) - State.footer_height)
-    if over > 0 then vim.cmd('normal! ' .. over .. '\x05') end  -- Ctrl-E
-end
-
 
 --- Show the header whenever the view is at the top
 local function header_in_view()
@@ -224,21 +202,18 @@ local function draw(keep_size)
     State.rows = rows
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     show_header()
-    vim.api.nvim_buf_set_lines(buf, -1, -1, false, vim.fn['repeat']({''}, #State.footer))  -- room under the float
     vim.bo[buf].modifiable = false
     vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
     for _, h in ipairs(hls) do
         vim.api.nvim_buf_set_extmark(buf, NS, h[1] - 1, 0, {end_row=h[1] - 1, end_col=#lines[h[1]], hl_group=h[4], priority=200})
     end
     if not keep_size then fit_height() end
-    show_footer()
     -- cursor on the current step's row in the tree; keep the top (the tour's name) in view while the row fits
     for row, id in pairs(rows) do
         if id == State.tree[State.walk[State.pos].row].id then
             vim.api.nvim_win_set_cursor(0, {row, 0})
             if row + State.header_height <= vim.api.nvim_win_get_height(0) then vim.fn.winrestview({topline=1}) end
             header_in_view()
-            cursor_above_footer()
         end
     end
     if not keep_size then show_code(State.tour.steps[State.tree[State.walk[State.pos].row].id]) end
@@ -279,8 +254,6 @@ function M.quit()
     end
     local state = State
     State = nil
-    if state.float_win and vim.api.nvim_win_is_valid(state.float_win) then vim.api.nvim_win_close(state.float_win, true) end
-    if state.float_buf and vim.api.nvim_buf_is_valid(state.float_buf) then vim.api.nvim_buf_delete(state.float_buf, {force=true}) end
     if vim.api.nvim_buf_is_valid(state.panel_buf) then vim.api.nvim_buf_delete(state.panel_buf, {force=true}) end
 end
 
@@ -336,10 +309,7 @@ function M.start(path, origin_bufnr, create_window)
     vim.keymap.set('n', 'q', M.quit, opts)
     vim.keymap.set('n', '<C-c>', M.quit, opts)
     vim.keymap.set('n', '<Esc>', M.quit, opts)
-    vim.api.nvim_create_autocmd({'CursorMoved', 'WinScrolled'}, {buffer=panel_buf, callback=function()
-        header_in_view()
-        cursor_above_footer()
-    end})
+    vim.api.nvim_create_autocmd({'CursorMoved', 'WinScrolled'}, {buffer=panel_buf, callback=header_in_view})
     -- The header is wrapped to the window's width: wrap again when it changes
     vim.api.nvim_create_autocmd({'WinResized', 'VimResized'}, {callback=function()
         if State and State.panel_buf == panel_buf and vim.api.nvim_buf_is_valid(panel_buf) then
@@ -377,7 +347,7 @@ function M.test_wrap_chunks()
         return vim.tbl_map(function(l) return table.concat(vim.tbl_map(function(c) return c[1] end, l)) end, lines)
     end
     eq(texts(M.wrap_chunks({{'one two three four', 'Comment'}}, 9)), {'one two ', 'three ', 'four'}, 'wrapped at spaces')
-    local lines = M.wrap_chunks(text_chunks('calls `save()` then exits', 'Comment'), 12)
+    local lines = M.wrap_chunks(M.text_chunks('calls `save()` then exits', 'Comment'), 12)
     eq(texts(lines), {'calls save()', 'then exits'}, 'code span kept, backticks dropped')
     eq(lines[1][2], {'save()', '@markup.raw.markdown_inline'}, 'code span highlighted')
     eq(texts(M.wrap_chunks({{'abcdefghij', 'Comment'}}, 4)), {'abcd', 'efgh', 'ij'}, 'long word cut')
