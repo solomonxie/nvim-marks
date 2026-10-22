@@ -111,10 +111,10 @@ A tour walks you through code step by step, like a website tutorial. Put tour fi
 
 In guided mode the panel shows the tour's name and description and the tour as a numbered tree with `▶` on the current step (as tall as that, up to its max height); the code window above opens each step's file with the cursor on its line, a green `▶` in the sign column there, and the step's explanation in gray just above the line (indented like the code, gone when you move to another step) (the line itself isn't highlighted, your cursor line shows it). The tour reuses that one window and opens each step's file the normal way (`:edit`), so it's an ordinary buffer: filetype, LSP, git signs and your other plugins work as usual. A file the tour opened is closed when it moves to another file, so only one is open at a time (files you already had open are left alone); the current one stays open when you leave. `q` leaves the tour on the current step's file; `Backspace` goes back to the file you started from and the marks window. Keys in the panel: `n` next, `p` previous, `<CR>` jump to the step under the cursor, `Backspace` back to the marks window, `q` / `Ctrl-c` / `Esc` leave. You can move to the code window to read around and come back.
 
-`n` walks the tree depth-first and, after each child, walks back up to its parent before going on, ending back at the root. The `▶` in the numbered tree shows where you are; there is no step counter, and the title says `end of tour` at the last stop:
+`n` walks the tree's rows top to bottom (depth-first). When the next step starts a new branch, it first goes back to that branch's parent, so you see where it starts, then on to the step; the tour ends on the last step. The `▶` in the numbered tree shows where you are; there is no step counter, and the title says `end of tour` at the last stop:
 
 ```
-1. A                 n:  A → B → D → B → E → B → A → C → A (end of tour)
+1. A                 n:  A → B → D → B → E → A → C (end of tour)
 2. └─ B
 3.    └─ D
 4.    └─ E

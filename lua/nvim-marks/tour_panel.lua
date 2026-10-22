@@ -56,14 +56,18 @@ local function show_code(step)
         local indent = vim.api.nvim_buf_call(bufnr, function() return vim.fn.indent(row) end)
         local width = math.max(20, vim.api.nvim_win_get_width(State.code_win) - vim.fn.getwininfo(State.code_win)[1].textoff - indent - 1)
         local pad = {string.rep(' ', indent), 'Normal'}
-        local title = '--- Guided tour: Current step explanation ---'
-        table.insert(virt_lines, {pad, {title, 'Comment'}})
+        local longest = 0
         for _, l in ipairs(vim.split(vim.trim(step.text), '\n', {plain=true})) do
             for _, wrapped in ipairs(M.wrap_chunks({{l, 'Comment'}}, width)) do  -- all gray, `code` left as typed
+                local text = vim.trim(table.concat(vim.tbl_map(function(c) return c[1] end, wrapped)))
+                longest = math.max(longest, vim.fn.strdisplaywidth(text))
                 table.insert(virt_lines, vim.list_extend({pad}, wrapped))
             end
         end
-        table.insert(virt_lines, {pad, {string.rep('-', vim.fn.strdisplaywidth(title)), 'Comment'}})  -- as wide as the title
+        -- rules above and below, as wide as the longest line
+        local rule = {pad, {string.rep('-', longest), 'Comment'}}
+        table.insert(virt_lines, 1, rule)
+        table.insert(virt_lines, rule)
         vim.api.nvim_buf_set_extmark(bufnr, NS_Sign, row - 1, 0, {virt_lines=virt_lines, virt_lines_above=true})
     end
     vim.api.nvim_win_set_cursor(State.code_win, {row, 0})

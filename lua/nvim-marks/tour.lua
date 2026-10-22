@@ -123,30 +123,24 @@ function M.tree(tour)
     return rows
 end
 
---- The order `n` walks: depth-first, and after each child it walks back up to the parent before the next child,
---- ending back at the root:  A─┬─B─┬─D  →  A B D B E B A C A
----                             │   └─E
----                             └─C
---- Walking back isn't a new step: each stop carries the index of its row in M.tree(tour) (`row`), and `back=true`
+--- The order `n` walks: the tree's rows top to bottom (depth-first), and when the next step isn't a child of the
+--- current one, first a stop back on its parent, so you see where the new branch starts. Ends on the last step:
+---   A─┬─B─┬─D        A B D B E A C
+---     │   └─E
+---     └─C
+--- Going back isn't a new step: each stop carries the index of its row in M.tree(tour) (`row`), and `back=true`
 --- when it revisits a step.
 ---
 --- @return table[] # [{row, back}] where row indexes the list M.tree(tour) returns
 function M.walk(tour, tree)
     tree = tree or M.tree(tour)
-    local row_of = {}
-    for i, r in ipairs(tree) do row_of[r.id] = row_of[r.id] or i end
-    local walk, expanded = {}, {}
-    local function visit(id)
-        expanded[id] = true
-        table.insert(walk, {row=row_of[id]})
-        for _, child in ipairs(tour.steps[id].children) do
-            if not expanded[child] then  -- a shared step is walked under its first parent only, like the tree
-                visit(child)
-                table.insert(walk, {row=row_of[id], back=true})
-            end
-        end
+    local walk, parent_row, at_depth = {}, {}, {}
+    for i, r in ipairs(tree) do
+        at_depth[r.depth] = i
+        parent_row[i] = r.depth > 0 and at_depth[r.depth - 1] or nil
+        if i > 1 and parent_row[i] ~= i - 1 then table.insert(walk, {row=parent_row[i], back=true}) end
+        table.insert(walk, {row=i})
     end
-    visit(tour.root)
     return walk
 end
 
@@ -210,7 +204,7 @@ function M.test_walk()
     local tree = M.tree(tour)
     local walk = M.walk(tour, tree)
     eq(vim.tbl_map(function(s) return tree[s.row].id .. (s.back and '<' or '') end, walk),
-       {'s1', 's2', 's4', 's2<', 's1<', 's3', 's5', 's3<', 's1<'}, 'walks back up after each child, shared step once')
+       {'s1', 's2', 's4', 's1<', 's3', 's5'}, 'back to the parent of the next branch, shared step once')
     -- the step number is the tree row, so walking back never goes past the number of steps
     local max_row = 0
     for _, s in ipairs(walk) do max_row = math.max(max_row, s.row) end
