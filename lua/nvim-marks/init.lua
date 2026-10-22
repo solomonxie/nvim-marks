@@ -217,6 +217,8 @@ end
 --- @param opt table|nil # {focus=note}: put the cursor on this note instead of on the current line's
 function M.openMarks(opt)
     opt = opt or {}
+    -- Not from inside one of the plugin's own panels (menu, note editor, tour): `m` there does nothing
+    if vim.b.is_marks_window then return end
     local target_bufnr = vim.api.nvim_get_current_buf()
     local target_row, _ = unpack(vim.api.nvim_win_get_cursor(0))  -- 0: current window_id
     MenuOrigin = {win=vim.api.nvim_get_current_win(), bufnr=target_bufnr, row=target_row}
@@ -589,6 +591,13 @@ end
 --- @return integer # Mark-window's Buffer id
 function M.create_window(content_lines, keep)
     if vim.b.is_marks_window == true then vim.cmd('bwipeout!') end  -- Close existing quick window
+    -- One panel at a time: close any other one in this tab, e.g. the tour panel (it stays open when you go to the
+    -- code, and closing it ends the tour) when `m` is pressed there
+    for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+        if win ~= vim.api.nvim_get_current_win() and vim.b[vim.api.nvim_win_get_buf(win)].is_marks_window then
+            vim.api.nvim_win_close(win, true)
+        end
+    end
     -- A scratch buffer from the start: other plugins' BufEnter hooks skip it (no git calls on every open)
     local bufnr = vim.api.nvim_create_buf(false, true)
     vim.cmd('botright ' .. M.window_height(content_lines) .. ' split')
