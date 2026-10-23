@@ -14,6 +14,7 @@ local utils = require('nvim-marks.utils')
 
 local IsBufferSetup = {}
 local NS_Preview = vim.api.nvim_create_namespace('nvim-marks.preview')
+local NS_Tables = vim.api.nvim_create_namespace('nvim-marks.tables')  -- markdown table padding, see align_markdown_tables
 local EditKey = 'o'  -- edits the note under the cursor in the menu
 local PanelMarkChars = 'ABCDEFHIJKLMOPQRSTUVWXYZ'  -- capitals set a mark from the menu; other lowercase keys (and G, N) keep their normal meaning there
 local NoteWidth = 80  -- notes column in the menu is as wide as the longest note, up to this; longer ones are cut with `…`
@@ -21,7 +22,6 @@ local PathWidthMax = 50  -- the path column is as wide as the longest path, up t
 local MenuOrigin = nil  -- {win, bufnr, row} the marks list was last opened from, for `[` in the editor to go back to
 local StatusTitles = {open='Notes', todo='TODO', done='DONE', anchor='Anchors'}
 local SectionOrder = {'open', 'todo', 'anchor', 'done'}  -- list sections top to bottom (same as the `@` cycle)
-local NS_Tables = vim.api.nvim_create_namespace('nvim-marks.tables')  -- markdown table padding, see align_markdown_tables
 local MarksMetadata = {}  -- {win_bufnr: {row: metadata}}, kept in Lua since vim.b turns sparse tables into lists
 local Peek = nil  -- {win, bufnr, view, opened, keep}: the code window showing the menu item under the cursor, see peek()
 
@@ -271,9 +271,9 @@ function M.openMarks(opt)
         live_keys[key] = true
         local name = key  -- path from the repo root, the same as for closed files, so the order doesn't depend on cwd
         for _, item in ipairs(utils.scan_notes(bufnr)) do
-            local id, row, note_lines, status = unpack(item)
+            local id, row, note_lines, status, created = unpack(item)
             table.insert(notes, {bufnr=bufnr, extmark_id=id, row=row, text=note_lines, status=status or 'open',
-                                 filename=name, line=utils.line_preview(bufnr, row)})
+                                 filename=name, line=utils.line_preview(bufnr, row), created=created})
         end
     end
     add_live(target_bufnr)
@@ -283,11 +283,14 @@ function M.openMarks(opt)
     for _, item in ipairs(utils.scan_repo_items(target_bufnr)) do
         if item.kind == 'note' and not live_keys[item.file] and not utils.is_empty_note(item.text) then
             table.insert(notes, {id=item.id, path=item.path, exists=item.exists, store_path=store_path, status=item.status or 'open',
-                                 row=item.row, text=item.text, filename=item.file, line=vim.trim(item.line or '')})
+                                 row=item.row, text=item.text, filename=item.file, line=vim.trim(item.line or ''),
+                                 created=item.created})
         end
     end
-    -- Always the same order, wherever the menu is opened from: by path from the repo root, then row
+    -- Most recent first in every section (`created`, UTC text that sorts by time); notes from before it was saved
+    -- have none and come last, by path then row, so the order never depends on where the menu was opened
     table.sort(notes, function(a, b)
+        if (a.created or '') ~= (b.created or '') then return (a.created or '') > (b.created or '') end
         if a.filename ~= b.filename then return a.filename < b.filename end
         return a.row < b.row
     end)
@@ -322,7 +325,6 @@ function M.openMarks(opt)
                 table.insert(involved, {t=t, step=step_id, how=how, title=step.title or step_id})
             end
         end
-        end
         section('# Tours (' .. #tours .. ')' .. (worktree and (' · ' .. worktree) or ''))
         for _, t in ipairs(tours) do
             local label = t.error and ('(!) ' .. t.name) or (t.name .. ' (' .. t.steps_count .. ' steps)')
@@ -340,6 +342,7 @@ function M.openMarks(opt)
                 previews[#content_lines] = (m.how == 'line' and 'step: ' or 'step in this function: ') .. m.title
                 marks_metadata[#content_lines] = {type='tour', path=m.t.path, step=m.step}
             end
+        end
     end
     local tours_rendered = false
     for _, status in ipairs(SectionOrder) do

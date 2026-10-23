@@ -24,7 +24,12 @@ M.FILE_NAME = 'marks.jsonl'
 M.LOG_FILE_NAME = 'marks-log.jsonl'  -- next to the store: every add/update/delete, appended, never rewritten
 local KnownRoots = {}  --- @type table<string, table<string, boolean>> # {store_path={root=true}}: checkouts seen this session
 local OLD_FILE_NAME = 'marks-history.json'  -- previous format, read once when there's no marks.jsonl yet
-local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line', 'above', 'below', 'commit'}
+local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line', 'above', 'below', 'commit', 'created'}
+
+--- @return string # now, as a record's `created` time: UTC, to the second, sorts as text
+function M.now()
+    return os.date('!%Y-%m-%dT%H:%M:%SZ')
+end
 
 --- A note's status, in the order `@` cycles through them and the marks list shows them
 M.STATUSES = {'open', 'todo', 'anchor', 'done'}
@@ -306,11 +311,6 @@ end
 ---
 --- @param loaded_texts table<string, string[]>|nil # {id=text} of notes as this nvim last loaded or saved them
 --- @param on_disk table<string, boolean>|nil # ids this nvim has loaded from or saved to the store
---- @param loaded_statuses table<string, string|false>|nil # {id=status} as last loaded or saved (false: none)
---- @return table[], boolean # merged records, whether anything changed
-function M.merge_file(records, file, current, known, loaded_texts, on_disk, loaded_statuses, loaded_files)
-    local by_id = {}
-    for _, record in ipairs(current) do by_id[record.id] = record end
 --- A record in `current` that's saved under another file on disk is one of two things, told apart by `loaded_files`:
 --- - renamed: it's still under the file key this nvim last loaded or saved it under, so this buffer's file was
 ---   renamed (e.g. `git mv`): this buffer's copy is written, under the new key, in the same place.
@@ -320,8 +320,13 @@ function M.merge_file(records, file, current, known, loaded_texts, on_disk, load
 ---   up in the note at its new file. Untouched text and status stay as they are on disk.
 --- Without an entry in `loaded_files` (or without `loaded_files`), it's taken as a rename.
 ---
-    local merged, changed, seen = {}, false, {}
+--- @param loaded_statuses table<string, string|false>|nil # {id=status} as last loaded or saved (false: none)
 --- @param loaded_files table<string, string>|nil # {id=file} the file key each record had when last loaded or saved
+--- @return table[], boolean # merged records, whether anything changed
+function M.merge_file(records, file, current, known, loaded_texts, on_disk, loaded_statuses, loaded_files)
+    local by_id = {}
+    for _, record in ipairs(current) do by_id[record.id] = record end
+    local merged, changed, seen = {}, false, {}
     for _, record in ipairs(records) do
         local loaded_file = loaded_files and loaded_files[record.id]
         if record.file ~= file and by_id[record.id] and loaded_file and record.file ~= loaded_file then
@@ -352,6 +357,9 @@ function M.merge_file(records, file, current, known, loaded_texts, on_disk, load
             local loaded = loaded_texts and loaded_texts[record.id]
             if new.kind == 'note' and loaded and vim.deep_equal(new.text, loaded) then
                 new = vim.tbl_extend('force', new, {text=record.text})  -- not edited here: keep theirs
+            end
+            if record.created and not new.created then
+                new = vim.tbl_extend('force', new, {created=record.created})  -- created once, never changed
             end
             if record.commit and new.row == record.row and new.line == record.line
                 and vim.deep_equal(new.above, record.above) and vim.deep_equal(new.below, record.below) then

@@ -369,4 +369,30 @@ function T.test_align_tables()
     vim.api.nvim_buf_delete(bufnr, {force=true})
 end
 
+--- A note keeps the time it was first saved: written as `created`, read back, and not changed by later saves
+function T.test_note_created_kept()
+    local tmp_dir = vim.fn.tempname()
+    vim.fn.mkdir(tmp_dir, 'p')
+    marks_file.dir_option = tmp_dir
+    local path = tmp_dir .. '/f.lua'
+    vim.fn.writefile(read_fixture('v1.lua'), path)
+    local bufnr = vim.fn.bufadd(path)
+    vim.fn.bufload(bufnr)
+    M.set_note(bufnr, 8, {'first'})
+    M.save_all(bufnr)
+    local store_path = select(2, M.buffer_store(bufnr))
+    local created = marks_file.load(store_path)[1].created
+    eq(created:match('^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ$') ~= nil, true, 'saved with a UTC time')
+    vim.api.nvim_buf_delete(bufnr, {force=true})
+    bufnr = vim.fn.bufadd(path)
+    vim.fn.bufload(bufnr)
+    M.restore_marks(bufnr)
+    M.set_note_status(bufnr, M.scan_notes(bufnr)[1][1], 'todo')
+    M.save_all(bufnr)
+    eq(marks_file.load(store_path)[1].created, created, 'kept after reloading and saving again')
+    vim.api.nvim_buf_delete(bufnr, {force=true})
+    marks_file.dir_option = nil
+    vim.fn.delete(tmp_dir, 'rf')
+end
+
 return T

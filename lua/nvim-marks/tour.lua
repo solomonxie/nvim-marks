@@ -81,7 +81,8 @@ function M.load(path)
     local cycle = M.find_cycle(steps, root)
     if cycle then return nil, path .. ': cycle through ' .. table.concat(cycle, ' → ') end
     local info = type(header.info) == 'table' and header.info or {}
-    return {name=header.tour, description=header.description or '', info=info, root=root, steps=steps, order=order, path=path}
+    return {name=header.tour, description=header.description or '', info=info, created=header.created,
+            root=root, steps=steps, order=order, path=path}
 end
 
 --- @return string[]|nil # the ids of a cycle reachable from `root`, or nil
@@ -135,7 +136,7 @@ end
 --- key). Backups and temp files (`*.bak*`, `*.tmp*`) end in something else, so they're skipped.
 ---
 --- @param dir string # the folder to search, with everything under it
---- @return table[] # every tour under `dir`, sorted by folder then name: [{name, description, path, folder, steps_count}]
+--- @return table[] # every tour under `dir`, most recent first: [{name, description, path, folder, steps_count, created}]
 ---                   plus [{path, error}] for files that didn't load, so the menu can say what's wrong
 function M.list(dir)
     local tours = {}
@@ -147,15 +148,19 @@ function M.list(dir)
             and (name:match('^tours%-') or starts_with_root(path)) then
             local folder = vim.fs.dirname(rel) == '.' and '' or vim.fs.dirname(rel)
             local tour, err = M.load(path)
+            -- when it was made: the root step's `created`, else the file's birth time (both UTC text, sort by time)
+            local stat = vim.uv.fs_stat(path)
+            local born = stat and os.date('!%Y-%m-%dT%H:%M:%SZ', (stat.birthtime.sec > 0 and stat.birthtime or stat.mtime).sec) or ''
             if tour then
-                table.insert(tours, {name=tour.name, description=tour.description, path=path, folder=folder, steps_count=#tour.order})
+                table.insert(tours, {name=tour.name, description=tour.description, path=path, folder=folder,
+                                     steps_count=#tour.order, created=tour.created or born})
             else
-                table.insert(tours, {name=name, path=path, folder=folder, error=err})
+                table.insert(tours, {name=name, path=path, folder=folder, error=err, created=born})
             end
         end
     end
-    table.sort(tours, function(a, b)
-        if a.folder ~= b.folder then return a.folder < b.folder end
+    table.sort(tours, function(a, b)  -- most recent first
+        if a.created ~= b.created then return a.created > b.created end
         return a.name < b.name
     end)
     return tours

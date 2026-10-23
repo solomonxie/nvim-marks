@@ -111,4 +111,19 @@ function T.test_list_skips_marks_files()
     vim.fn.delete(dir, 'rf')
 end
 
+--- Tours are listed most recent first, by the root step's `created`
+function T.test_list_newest_first()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, 'p')
+    local function tour(name, created)
+        local root = {id='r', tour=name, created=created, title='Overview'}
+        vim.fn.writefile({vim.json.encode(root)}, dir .. '/tours-' .. name .. '.jsonl')
+    end
+    tour('older', '2026-10-20T10:00:00Z')
+    tour('newest', '2026-10-23T10:00:00Z')
+    tour('middle', '2026-10-22T10:00:00Z')
+    eq(vim.tbl_map(function(t) return t.name end, M.list(dir)), {'newest', 'middle', 'older'}, 'most recent first')
+    vim.fn.delete(dir, 'rf')
+end
+
 return T

@@ -8,6 +8,7 @@ M.NS_Signs = vim.api.nvim_create_namespace('nvim-marks.signs')
 M.NS_Notes = vim.api.nvim_create_namespace('nvim-marks.notes')
 M.NoteTexts = {}  --- @type table<integer, table<integer, string[]>> # {bufnr={mark_id=lines}}
 M.NoteStatuses = {}  --- @type table<integer, table<integer, string>> # {bufnr={mark_id=status}}; missing = open
+M.NoteCreated = {}  --- @type table<integer, table<integer, string>> # {bufnr={mark_id=created time}}, see marks_file.now
 M.LoadedStatuses = {}  --- @type table<integer, table<string, string|false>> # {bufnr={id=status}} as last loaded/saved
 M.note_style = vim.g.nvim_marks_note_style or 'inline'  --- @type 'inline'|'above' # set by setup()
 M.note_prefix = '    -- '  --- @type string # before an inline note
@@ -17,8 +18,8 @@ M.RecordIds = {}  --- @type table<integer, table> # {bufnr={marks={char=id}, not
 M.OnDisk = {}  --- @type table<integer, table<string, boolean>> # {bufnr={id=true}}: records this buffer loaded or saved
 M.LoadedAt = {}  --- @type table<integer, integer> # {bufnr=store mtime when its notes were last loaded or saved}
 M.LoadedTexts = {}  --- @type table<integer, table<string, string[]>> # {bufnr={id=text}}, notes as last loaded or saved, to tell our edits from others'
-
 M.LoadedFiles = {}  --- @type table<integer, table<string, string>> # {bufnr={id=file}}: file key as last loaded or saved, to tell a rename of this file from a move elsewhere
+
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 function M.is_real_file(bufnr)
@@ -152,7 +153,7 @@ end
 
 --- Get notes(extmarks) from given buffer
 ---
---- @return table[] # list of extmark details [{mark_id, row, text, status}, {...}]; status nil = open
+--- @return table[] # list of extmark details [{mark_id, row, text, status, created}, {...}]; status nil = open
 function M.scan_notes(bufnr)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Note texts are kept by real bufnr
     local notes = {}
@@ -160,7 +161,7 @@ function M.scan_notes(bufnr)
     for _, ext in ipairs(items) do
         local mark_id, row, _ = unpack(ext)
         local text = (M.NoteTexts[bufnr] or {})[mark_id] or {}
-        table.insert(notes, {mark_id, row+1, text, (M.NoteStatuses[bufnr] or {})[mark_id]})
+        table.insert(notes, {mark_id, row+1, text, (M.NoteStatuses[bufnr] or {})[mark_id], (M.NoteCreated[bufnr] or {})[mark_id]})
     end
     return notes
 end
@@ -210,7 +211,8 @@ end
 function M.note_display_opts(text, status) return note_display(text, status) end
 
 --- @param status string|nil # open/todo/anchor/done; nil = open
-function M.set_note(bufnr, row, text, record_id, status)
+--- @param created string|nil # when the note was first saved; nil for a new one (now)
+function M.set_note(bufnr, row, text, record_id, status, created)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Note texts are kept by real bufnr
     local mark_id = vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row-1, 0, note_display(text, status))  -- extmark is 0-indexed
     M.NoteStatuses[bufnr] = M.NoteStatuses[bufnr] or {}
@@ -218,6 +220,8 @@ function M.set_note(bufnr, row, text, record_id, status)
     -- Shown text is joined for display, keep the original lines for saving and editing
     M.NoteTexts[bufnr] = M.NoteTexts[bufnr] or {}
     M.NoteTexts[bufnr][mark_id] = text
+    M.NoteCreated[bufnr] = M.NoteCreated[bufnr] or {}
+    M.NoteCreated[bufnr][mark_id] = created or marks_file.now()
     ids_of(bufnr).notes[mark_id] = track(bufnr, record_id or marks_file.new_id())
     return mark_id
 end
@@ -313,9 +317,9 @@ function M.save_all(bufnr)
         table.insert(current, record(ids.marks[char], 'mark', row, {char=char}))
     end
     for _, item in ipairs(M.scan_notes(bufnr)) do
-        local mark_id, row, text, status = unpack(item)
+        local mark_id, row, text, status, created = unpack(item)
         ids.notes[mark_id] = ids.notes[mark_id] or track(bufnr, marks_file.new_id())
-        table.insert(current, record(ids.notes[mark_id], 'note', row, {text=text, status=status}))
+        table.insert(current, record(ids.notes[mark_id], 'note', row, {text=text, status=status, created=created}))
     end
     vim.list_extend(current, M.Orphans[bufnr] or {})  -- saved as they were
     -- Re-read right before writing, another nvim (e.g. in another worktree) may have saved meanwhile
@@ -476,6 +480,7 @@ function M.restore_marks(bufnr)
     vim.api.nvim_buf_clear_namespace(bufnr, M.NS_Notes, 0, -1)
     M.NoteTexts[bufnr] = {}
     M.NoteStatuses[bufnr] = {}
+    M.NoteCreated[bufnr] = {}
     M.LoadedStatuses[bufnr] = {}
     M.RecordIds[bufnr] = {marks={}, notes={}, known={}}
     M.Orphans[bufnr] = {}
@@ -511,7 +516,7 @@ function M.restore_marks(bufnr)
         elseif M.is_empty_note(record.text) then
             track(bufnr, record.id)  -- emptied (e.g. by an agent or by hand): counts as deleted, dropped on save
         else
-            M.set_note(bufnr, row, record.text, record.id, record.status)
+            M.set_note(bufnr, row, record.text, record.id, record.status, record.created)
             M.LoadedTexts[bufnr][record.id] = record.text
             M.LoadedStatuses[bufnr][record.id] = record.status or false
         end

@@ -2,7 +2,6 @@
 local M = require('nvim-marks.anchor')
 local T = {}
 local HASH_LEN = M.HASH_LEN
-
 local function read_fixture(name)
     local dir = vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2)) .. '/fixtures/'
     return vim.fn.readfile(dir .. name)
