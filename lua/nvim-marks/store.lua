@@ -107,6 +107,19 @@ function M.work_files_repo(path)
     return {top=dir .. '/' .. repo, repo=repo}
 end
 
+--- Where to look for tours from a buffer: a linked worktree's own work-files folder (`<dir>/<repo>/<worktree>`, the
+--- checkout's folder name), or the whole `<dir>/<repo>` from the main checkout, a work file, or outside git.
+---
+--- @param path string # the buffer's file, resolved
+--- @return string, string|nil # folder to search (with everything under it), and the worktree name when it's one
+function M.tours_dir(path, info)
+    local repo_dir = vim.fs.dirname(M.store_path(info))
+    if M.work_files_repo(path) or not info.top then return repo_dir, nil end
+    local worktree = vim.fs.basename(info.top)
+    if worktree == info.repo then return repo_dir, nil end  -- the main checkout: every worktree's tours
+    return repo_dir .. '/' .. worktree, worktree
+end
+
 --- Remember a checkout of a repo, so its files can be found from a buffer in another checkout or a work file
 function M.remember_root(store_path, root)
     if not root then return end
@@ -516,6 +529,14 @@ function M.test_repo_name()
     eq(M.repo_name('/w/myapp-fix', '/w/myapp/.git'), 'myapp', 'worktree of a normal repo')
     eq(M.repo_name('/home/me/dot', '/home/me/.dot.git'), 'dot', 'separate hidden git dir')
     eq(M.repo_name('/w/myapp-wt', '/srv/myapp.git'), 'myapp', 'bare repo')
+end
+
+function M.test_tours_dir()
+    M.dir_option = '/notes'
+    eq({M.tours_dir('/w/myapp-fix/a.lua', {top='/w/myapp-fix', repo='myapp'})}, {'/notes/myapp/myapp-fix', 'myapp-fix'}, 'worktree: its own folder')
+    eq({M.tours_dir('/w/myapp/a.lua', {top='/w/myapp', repo='myapp'})}, {'/notes/myapp'}, 'main checkout: the whole repo')
+    eq({M.tours_dir('/notes/myapp/myapp-fix/plan.md', {top='/notes/myapp', repo='myapp'})}, {'/notes/myapp'}, 'work file: the whole repo')
+    M.dir_option = nil
 end
 
 function M.test_work_files_repo()

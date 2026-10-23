@@ -83,7 +83,7 @@ m
 
 " In the marks window:
 " Press A-Z     - Add a global mark at current line (except G, N)
-" Press <CR>    - Jump to the mark/note under the cursor
+" Press <Enter> - Jump to the mark/note under the cursor
 " Press a       - Add a note/annotation, or edit the one on the current line
 " Press o       - Open the note under the cursor to edit it, or start the tour under it
 " Press -       - Delete the mark/note under the cursor (asks y/n)
@@ -107,14 +107,16 @@ m
 
 ## 🧭 Guided marks (tours)
 
-A tour walks you through code step by step, like a website tutorial. Put tour files next to `marks.jsonl`, as `<dir>/<repo>/tours-<slug>.jsonl` (shared by every worktree). Any other `.jsonl` there whose first line has a `"tour"` key counts too; `marks.jsonl` and `marks-log.jsonl` never do. The marks window lists them under `# Tours`, above the Anchors section; `<CR>` or `o` on one starts guided mode.
+A tour walks you through code step by step, like a website tutorial. A tour belongs to a piece of work, so put it in that worktree's folder under the marks folder: `<dir>/<repo>/<worktree>/tours-<slug>.jsonl` (`<worktree>` is the checkout's folder name, `main` for the main checkout; subfolders are fine). Any other `.jsonl` there whose first line has a `"tour"` key counts too; `marks.jsonl` and `marks-log.jsonl` never do. The marks window lists them under `# Tours`, above the Anchors section: in a worktree, the tours in its own folder; in the main checkout, every tour of the repo, each with its worktree folder in brackets. `<Enter>` or `o` on one starts guided mode.
 
-In guided mode the panel shows the tour's name and description and the tour as a numbered tree with `▶` on the current step (as tall as that, up to its max height); the code window above opens each step's file with the cursor on its line, a green `▶` in the sign column there, and the step's explanation in gray just above the line (indented like the code, gone when you move to another step) (the line itself isn't highlighted, your cursor line shows it). The tour reuses that one window and opens each step's file the normal way (`:edit`), so it's an ordinary buffer: filetype, LSP, git signs and your other plugins work as usual. A file the tour opened is closed when it moves to another file, so only one is open at a time (files you already had open are left alone); the current one stays open when you leave. `q` leaves the tour on the current step's file; `Backspace` goes back to the file you started from and the marks window. Keys in the panel: `n` next, `p` previous, `<CR>` jump to the step under the cursor, `Backspace` back to the marks window, `q` / `Ctrl-c` / `Esc` leave. You can move to the code window to read around and come back.
+As you walk a tour, a step whose line is found at a new row (or with edited text) gets that row and text saved back into the tour file, like a note's anchor, so the tour keeps up with the code. Only that step's line in the file is rewritten.
 
-`n` walks the tree's rows top to bottom (depth-first). When the next step starts a new branch, it first goes back to that branch's parent, so you see where it starts, then on to the step; the tour ends on the last step. The `▶` in the numbered tree shows where you are; there is no step counter, and the title says `end of tour` at the last stop:
+In guided mode the panel shows the tour's name and description and the tour as a numbered tree with `▶` on the current step (as tall as that, up to its max height); the code window above opens each step's file with the cursor on its line, a green `▶` in the sign column there, and the step's explanation in gray just above the line (indented like the code, gone when you move to another step) (the line itself isn't highlighted, your cursor line shows it). The tour reuses that one window and opens each step's file the normal way (`:edit`), so it's an ordinary buffer: filetype, LSP, git signs and your other plugins work as usual. A file the tour opened is closed when it moves to another file, so only one is open at a time (files you already had open are left alone); the current one stays open when you leave. `q` leaves the tour on the current step's file; `<Backspace>` goes back to the file you started from and the marks window. Keys in the panel: `n` next, `p` previous, `<Enter>` jump to the step under the cursor, `<Backspace>` back to the marks window, `q` / `Ctrl-c` / `Esc` leave. You can move to the code window to read around and come back.
+
+`n` goes down the tree's rows top to bottom (depth-first), each step once, and the tour ends on the last step. The `▶` in the numbered tree shows where you are; there is no step counter, and the title says `end of tour` at the last stop:
 
 ```
-1. A                 n:  A → B → D → B → E → A → C (end of tour)
+1. A                 n:  A → B → D → E → C (end of tour)
 2. └─ B
 3.    └─ D
 4.    └─ E
@@ -130,7 +132,13 @@ Format: one step per line, every line the same shape. The root step comes first 
 {"id":"s2","title":"encode","file":"src/store.lua","row":5,"line":"local function encode(data)","text":"JSON encoder used by save."}
 ```
 
-`file` is the path from the repo root; `row` and `line` (the exact code) find the step's line again after edits, like a note. Add `"commit"` (HEAD when the tour was written, e.g. `git rev-parse --short=12 HEAD`) and a step whose line was later rewritten is still found, through the diff since that commit. `text` is the explanation (markdown, `\n` for new lines). The plugin only reads tours: write them by hand, or have an LLM write one. Tours with a separate header line (`{"tour":..., "root":"s1"}` before the steps) still load.
+The root step can also carry `info`, anything that helps find the code again, listed in gray below the tree (scroll down to it); `<Enter>` on a line whose value is a URL opens it:
+
+```json
+"info":{"worktree":"myapp-fix-login","branch":"fix/login","commit":"a2b6ce6f1d3e","pr":"https://github.com/org/myapp/pull/12","jira":"https://org.atlassian.net/browse/ENG-1"}
+```
+
+`file` is the path from the repo root, or an absolute path for a file in another repo (the panel then shows its full path, `~` for home, instead of just the file name, so you can tell it's outside the repo); `row` and `line` (the exact code) find the step's line again after edits, like a note. Add `"commit"` (HEAD when the tour was written, e.g. `git rev-parse --short=12 HEAD`) and a step whose line was later rewritten is still found, through the diff since that commit. `text` is the explanation (markdown, `\n` for new lines). The plugin only reads tours: write them by hand, or have an LLM write one. Tours with a separate header line (`{"tour":..., "root":"s1"}` before the steps) still load.
 
 ## ⚙️ Configuration
 
@@ -182,9 +190,9 @@ For each mark and note, nvim-marks saves an anchor: the row, the line's text, sh
 4. Otherwise use the commit saved with it (`"commit"`, HEAD when it was last saved, 12 characters): find the line in the file as it was at that commit, then carry the row through `git diff` to the current file, the way GitHub keeps a PR comment on its line. This finds a line that was rewritten or whose surroundings changed, and follows a file renamed since (the record then moves to the new path). Only for a commit in the current branch's history: a note saved on another branch, or on a commit rebased away, skips this.
 5. Otherwise it's an orphan: listed in the marks window under "Not found in this version", kept in the store, and tried again every time the file is opened (e.g. after switching back to the branch where the line exists). Delete it with `-`.
 
-The marks window lists the notes of every file in the repo, the current file's first. `<CR>` opens the file at the note, `o` opens it to edit, `-` deletes it, even for files that aren't open.
+The marks window lists the notes of every file in the repo, the current file's first. `<Enter>` opens the file at the note, `o` opens it to edit, `-` deletes it, even for files that aren't open.
 
-As you move the cursor in the marks window, the code window above shows the mark or note under it, with its cursor on that line. It reuses that one window and opens files the normal way (`:edit`), so they're ordinary buffers with git signs, LSP and the rest; a file it opened is closed again when you move to another file, so only one is open at a time. `q` / `Esc` puts the window back on the file you were on; `<CR>` or going to the code window keeps what it shows.
+As you move the cursor in the marks window, the code window above shows the mark or note under it, with its cursor on that line. It reuses that one window and opens files the normal way (`:edit`), so they're ordinary buffers with git signs, LSP and the rest; a file it opened is closed again when you move to another file, so only one is open at a time. `q` / `Esc` puts the window back on the file you were on; `<Enter>` or going to the code window keeps what it shows.
 
 ### Data Storage
 

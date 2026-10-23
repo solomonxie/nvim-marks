@@ -14,18 +14,63 @@ local utils = require('nvim-marks.utils')
 local NS = vim.api.nvim_create_namespace('nvim-marks.tour-panel')
 local NS_Sign = vim.api.nvim_create_namespace('nvim-marks.tour-sign')  -- the ▶ on the step's line in the code window
 local NS_Header = vim.api.nvim_create_namespace('nvim-marks.tour-header')  -- tour name and description, virtual lines on top
-local State = nil  --- @type table|nil # {tour, tree, pos, code_win, panel_buf, origin_bufnr, origin_view, opened, rows={panel row = step id}}
+local State = nil  --- @type table|nil # {tour, tree, pos, code_win, panel_buf, origin_bufnr, origin_view, opened, snapshot_buf, rows={panel row = step id}}
 
---- Find a step's line in its file now (it may have moved since the tour was written)
+--- @return table # the step's anchor, for anchor.locate
+local function step_anchor(step)
+    return {row=step.row or 1, line=step.line, above=step.above or {}, below=step.below or {}}
+end
+
+--- Find a step's line in its file in this checkout now (it may have moved since the tour was written)
 ---
---- @return string|nil, integer|nil # path, row (nil when the file isn't in any checkout)
+--- @return string|nil, integer|nil # path, row; nil when the file isn't here or its line isn't in it (e.g. the code
+---                                   is only on another branch), so the caller shows a snapshot instead
 local function locate(step)
     local path, exists = utils.resolve_file(step.file, State.origin_bufnr)
     if not exists then return nil, nil end
+    if not step.line then return path, step.row or 1 end  -- no anchor text: trust the row
     local lines = vim.fn.readfile(path)
-    local row = step.line and (anchor.locate({row=step.row or 1, line=step.line, above=step.above or {}, below=step.below or {}}, lines)
-                               or utils.relocate_step(step, State.origin_bufnr, lines))
-    return path, row or step.row or 1
+    local row = anchor.locate(step_anchor(step), lines) or utils.relocate_step(step, State.origin_bufnr, lines)
+    if not row then return nil, nil end
+    -- Found at a new row or with new text: save that to the step, like a note's anchor is saved, so the tour keeps up
+    -- with the code (a snapshot step, not found here, is left as it is)
+    if row ~= step.row or lines[row] ~= step.line then
+        local fields = {row=row, line=lines[row]}
+        local commit = utils.head_commit(State.origin_bufnr)
+        if commit and step.commit then fields.commit = commit end  -- keep the commit with the line it describes
+        if tour_lib.update_step(State.tour.path, step.id, fields) then
+            for k, v in pairs(fields) do step[k] = v end
+        end
+    end
+    return path, row
+end
+
+--- A read-only scratch buffer with the step's code when it isn't in this checkout: the file at the step's commit
+--- (read from git, so a commit on any branch or worktree works), or else just the line the tour saved. One buffer,
+--- reused for every such step, so the tour goes on without stopping.
+---
+--- @return integer, integer, string # buffer, row, where the text came from
+local function snapshot(step)
+    local lines = step.commit and utils.file_at_commit(State.origin_bufnr, step.commit, step.file)
+    local row, source
+    if lines then
+        row = (step.line and anchor.locate(step_anchor(step), lines)) or math.min(step.row or 1, #lines)
+        source = 'at commit ' .. step.commit
+    else
+        lines, row, source = {step.line or ''}, 1, 'only the saved line'
+    end
+    local buf = State.snapshot_buf
+    if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+        buf = vim.api.nvim_create_buf(false, true)
+        vim.bo[buf].bufhidden = 'wipe'
+        State.snapshot_buf = buf
+    end
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    pcall(vim.api.nvim_buf_set_name, buf, 'nvim-marks-tour://' .. (step.commit or 'saved') .. '/' .. step.file)
+    vim.bo[buf].filetype = vim.filetype.match({filename=step.file, buf=buf}) or ''
+    return buf, row, source
 end
 
 --- Show the step in the code window: its file (with filetype/syntax, like :edit), cursor on its line, centered, a
@@ -34,14 +79,20 @@ end
 --- The tour reuses that one window; each file is opened with :edit (an ordinary buffer). A file the tour opened is
 --- closed when it moves to another file, so there's one at a time; files you had open are left alone.
 local function show_code(step)
-    local path, row = locate(step)
-    if not path then
-        vim.api.nvim_echo({{'Not found in any checkout: ' .. step.file, 'WarningMsg'}}, false, {})
-        return
-    end
     if not vim.api.nvim_win_is_valid(State.code_win) then return end
-    local bufnr, opened = utils.show_in_window(State.code_win, path)
-    if not bufnr then return end
+    local path, row = locate(step)
+    local bufnr, opened, note
+    if path then
+        bufnr, opened = utils.show_in_window(State.code_win, path)
+        if not bufnr then return end
+    else
+        -- Not in this checkout: show a snapshot instead, the tour goes on
+        local source
+        bufnr, row, source = snapshot(step)
+        utils.show_in_window(State.code_win, bufnr)
+        opened = false
+        note = step.file .. ' · not in this checkout, showing ' .. source
+    end
     if State.opened and State.opened ~= bufnr then utils.close_preview_buffer(State.opened) end
     if opened then State.opened = bufnr elseif State.opened ~= bufnr then State.opened = nil end
     for _, b in ipairs(vim.api.nvim_list_bufs()) do
@@ -68,6 +119,9 @@ local function show_code(step)
         local rule = {pad, {string.rep('-', longest), 'Comment'}}
         table.insert(virt_lines, 1, rule)
         table.insert(virt_lines, rule)
+    end
+    if note then table.insert(virt_lines, 1, {{note, 'WarningMsg'}}) end  -- where a snapshot's text came from
+    if #virt_lines > 0 then
         vim.api.nvim_buf_set_extmark(bufnr, NS_Sign, row - 1, 0, {virt_lines=virt_lines, virt_lines_above=true})
     end
     vim.api.nvim_win_set_cursor(State.code_win, {row, 0})
@@ -151,7 +205,7 @@ local function show_header()
         for _, wrapped in ipairs(M.wrap_chunks(chunks, width)) do table.insert(virt_lines, wrapped) end
     end
     local name = {{State.tour.name, heading}}
-    if State.pos == #State.walk then table.insert(name, {'  · end of tour', 'Comment'}) end
+    if State.pos == #State.tree then table.insert(name, {'  · end of tour', 'Comment'}) end
     add(name)
     if State.tour.description ~= '' then add(M.text_chunks(State.tour.description, 'Comment')) end
     table.insert(virt_lines, {{'', 'Normal'}})
@@ -164,7 +218,7 @@ end
 local function fit_height()
     local win = vim.fn.bufwinid(State.panel_buf)
     if win == -1 then return end
-    local wanted = State.header_height + #State.tree
+    local wanted = State.header_height + #State.tree  -- the info under the tree is scrolled to, not fitted
     vim.api.nvim_win_set_height(win, require('nvim-marks').window_height(wanted))
 end
 
@@ -178,10 +232,21 @@ local function header_in_view()
 end
 
 --- @return string[], table, table # panel lines, {row = step id}, highlights [{row, col, end_col, group}]
+--- Where a step's code is, as shown after its title: just the file name for the current repo, the full path
+--- (`~` for home) for a file elsewhere (an absolute `file`, e.g. another repo), so it's clear it's outside
+---
+--- @param file string|nil # the step's `file`
+--- @param row integer|nil
+--- @return string
+function M.step_location(file, row)
+    file = file or ''
+    local name = vim.startswith(file, '/') and vim.fn.fnamemodify(file, ':~') or vim.fs.basename(file)
+    return name .. ':' .. tostring(row or '?')
+end
+
 local function render()
     local tour, tree = State.tour, State.tree
-    local stop = State.walk[State.pos]
-    local here = tree[stop.row]
+    local here = tree[State.pos]
     -- Only the tree is text; the tour's name, the current step and its explanation are virtual lines above it
     local lines, rows, hls = {}, {}, {}
     local number_width = #tostring(#tree)
@@ -190,10 +255,27 @@ local function render()
         local marker = r.id == here.id and '▶' or ' '
         local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
         local indent = r.depth > 0 and (string.rep('   ', r.depth - 1) .. '└─ ') or ''
-        local location = vim.fs.basename(step.file or '') .. ':' .. tostring(step.row or '?')
-        table.insert(lines, string.format('%s %s %s%s%s   %s', marker, number, indent, step.title or r.id, r.shared and ' (shared)' or '', location))
+        local location = M.step_location(step.file, step.row)
+        table.insert(lines, string.format('%s %s %s%s%s', marker, number, indent, step.title or r.id, r.shared and ' (shared)' or ''))
         rows[#lines] = r.id
         if r.id == here.id then table.insert(hls, {#lines, 0, -1, 'Title'}) end  -- only the current step stands out
+        -- file:row as gray virtual text after the title: not part of the row's text, so the cursor and yanks skip it
+        table.insert(hls, {#lines, 0, -1, nil, nil, {{'   ' .. location, 'Comment'}}})
+    end
+    -- The tour's info (worktree, branch, PR, ...) under the tree, in gray: scroll down to it; <Enter> opens a link
+    local keys = vim.tbl_keys(tour.info)
+    table.sort(keys)
+    State.links = {}
+    if #keys > 0 then
+        table.insert(lines, '')
+        local key_width = 0
+        for _, k in ipairs(keys) do key_width = math.max(key_width, vim.fn.strdisplaywidth(k)) end
+        for _, k in ipairs(keys) do
+            local value = tostring(tour.info[k])
+            table.insert(lines, k .. string.rep(' ', key_width - vim.fn.strdisplaywidth(k)) .. '  ' .. value)
+            table.insert(hls, {#lines, 0, -1, 'Comment'})
+            if value:match('^https?://') then State.links[#lines] = value end
+        end
     end
     return lines, rows, hls
 end
@@ -208,24 +290,31 @@ local function draw(keep_size)
     show_header()
     vim.bo[buf].modifiable = false
     vim.api.nvim_buf_clear_namespace(buf, NS, 0, -1)
+    -- each hl is {row, start_col, end_col (-1: to the end), group, priority (default 200)}, columns in bytes,
+    -- or {row, 0, -1, nil, nil, virt_text} for gray text drawn right after the row's text
     for _, h in ipairs(hls) do
-        vim.api.nvim_buf_set_extmark(buf, NS, h[1] - 1, 0, {end_row=h[1] - 1, end_col=#lines[h[1]], hl_group=h[4], priority=200})
+        if h[6] then
+            vim.api.nvim_buf_set_extmark(buf, NS, h[1] - 1, 0, {virt_text=h[6], virt_text_pos='eol'})
+        else
+            local end_col = h[3] == -1 and #lines[h[1]] or h[3]
+            vim.api.nvim_buf_set_extmark(buf, NS, h[1] - 1, h[2], {end_row=h[1] - 1, end_col=end_col, hl_group=h[4], priority=h[5] or 200})
+        end
     end
     if not keep_size then fit_height() end
     -- cursor on the current step's row in the tree; keep the top (the tour's name) in view while the row fits
     for row, id in pairs(rows) do
-        if id == State.tree[State.walk[State.pos].row].id then
+        if id == State.tree[State.pos].id then
             vim.api.nvim_win_set_cursor(0, {row, 0})
             if row + State.header_height <= vim.api.nvim_win_get_height(0) then vim.fn.winrestview({topline=1}) end
             header_in_view()
         end
     end
-    if not keep_size then show_code(State.tour.steps[State.tree[State.walk[State.pos].row].id]) end
+    if not keep_size then show_code(State.tour.steps[State.tree[State.pos].id]) end
 end
 
 local function move(delta)
     local pos = State.pos + delta
-    if pos < 1 or pos > #State.walk then
+    if pos < 1 or pos > #State.tree then
         vim.api.nvim_echo({{pos < 1 and 'At the start of the tour' or 'End of tour', 'Normal'}}, false, {})
         return
     end
@@ -233,13 +322,14 @@ local function move(delta)
     draw()
 end
 
---- Jump to the step under the cursor in the tree
+--- Jump to the step under the cursor in the tree, or open the link under it
 local function jump()
-    local id = State.rows[vim.api.nvim_win_get_cursor(0)[1]]
+    local row = vim.api.nvim_win_get_cursor(0)[1]
+    if State.links[row] then return vim.ui.open(State.links[row]) end  -- a link in the info under the tree
+    local id = State.rows[row]
     if not id then return end
-    -- go to the first stop on that step (its first visit, not a walk back)
-    for i, stop in ipairs(State.walk) do
-        if not stop.back and State.tree[stop.row].id == id then
+    for i, r in ipairs(State.tree) do
+        if r.id == id then
             State.pos = i
             return draw()
         end
@@ -258,6 +348,14 @@ function M.quit()
     end
     local state = State
     State = nil
+    -- a snapshot left in the code window: put back the file the tour was started from
+    if state.snapshot_buf and vim.api.nvim_buf_is_valid(state.snapshot_buf) then
+        if vim.api.nvim_win_is_valid(state.code_win) and vim.api.nvim_win_get_buf(state.code_win) == state.snapshot_buf
+            and vim.api.nvim_buf_is_valid(state.origin_bufnr) then
+            vim.api.nvim_win_set_buf(state.code_win, state.origin_bufnr)
+        end
+        if vim.api.nvim_buf_is_valid(state.snapshot_buf) then vim.api.nvim_buf_delete(state.snapshot_buf, {force=true}) end
+    end
     if vim.api.nvim_buf_is_valid(state.panel_buf) then vim.api.nvim_buf_delete(state.panel_buf, {force=true}) end
 end
 
@@ -265,6 +363,7 @@ end
 local function back_to_menu()
     if not State then return end
     local code_win, origin_bufnr, origin_view, state_opened = State.code_win, State.origin_bufnr, State.origin_view, State.opened
+    local tour_path = State.tour.path
     M.quit()
     if not vim.api.nvim_win_is_valid(code_win) then return end
     vim.api.nvim_set_current_win(code_win)
@@ -274,7 +373,7 @@ local function back_to_menu()
         if origin_view then vim.fn.winrestview(origin_view) end
         if opened == state_opened then utils.close_preview_buffer(opened) end  -- the tour's file, not yours
     end
-    require('nvim-marks').openMarks()
+    require('nvim-marks').openMarks({focus_tour=tour_path})  -- cursor on this tour's row
 end
 
 --- Start guided mode for a tour file, from the marks panel
@@ -282,7 +381,8 @@ end
 --- @param path string # tour file
 --- @param origin_bufnr integer # the code buffer the menu was opened from (to know the repo)
 --- @param create_window function # makes the panel window (init.lua's), returns its buffer
-function M.start(path, origin_bufnr, create_window)
+--- @param step_id string|nil # start on this step instead of the first (a tour involving the cursor's line)
+function M.start(path, origin_bufnr, create_window, step_id)
     local tour, err = tour_lib.load(path)
     if not tour then
         vim.api.nvim_echo({{'nvim-marks: ' .. err, 'ErrorMsg'}}, false, {})
@@ -302,14 +402,19 @@ function M.start(path, origin_bufnr, create_window)
     vim.cmd([[highlight default link NvimMarksCode @markup.raw.markdown_inline]])
     vim.wo.conceallevel = 2
     vim.wo.concealcursor = 'nc'
-    State = {tour=tour, tree=tree, walk=tour_lib.walk(tour, tree), pos=1, code_win=code_win, panel_buf=panel_buf,
+    local pos = 1
+    for i, r in ipairs(tree) do
+        if r.id == step_id then pos = i; break end
+    end
+    State = {tour=tour, tree=tree, pos=pos, code_win=code_win, panel_buf=panel_buf,
              origin_bufnr=origin_bufnr, origin_view=origin_view, rows={}}
-    vim.wo.winbar = '%#Comment#' .. ('Help: n next | p previous | <CR> jump to step | Backspace main menu | q quit'):gsub('%%', '%%%%')
+    vim.wo.winbar = '%#Comment#' .. ('Help: n next | p previous | <Enter> jump to step | <Backspace> main menu | q quit'):gsub('%%', '%%%%')
     local opts = {buffer=panel_buf, silent=true, nowait=true}
     vim.keymap.set('n', 'n', function() move(1) end, opts)
     vim.keymap.set('n', 'p', function() move(-1) end, opts)
     vim.keymap.set('n', '<CR>', jump, opts)
     vim.keymap.set('n', '<BS>', back_to_menu, opts)
+    vim.keymap.set('n', '[', back_to_menu, opts)  -- same as Backspace, not in the help line
     vim.keymap.set('n', 'q', M.quit, opts)
     vim.keymap.set('n', '<C-c>', M.quit, opts)
     vim.keymap.set('n', '<Esc>', M.quit, opts)
@@ -356,6 +461,13 @@ function M.test_wrap_chunks()
     eq(lines[1][2], {'save()', '@markup.raw.markdown_inline'}, 'code span highlighted')
     eq(texts(M.wrap_chunks({{'abcdefghij', 'Comment'}}, 4)), {'abcd', 'efgh', 'ij'}, 'long word cut')
     eq(texts(M.wrap_chunks({}, 10)), {''}, 'empty line stays a line')
+end
+
+function M.test_step_location()
+    eq(M.step_location('src/store.lua', 5), 'store.lua:5', 'file in this repo: name only')
+    local other = vim.fn.expand('~') .. '/workspace/other-repo/src/a.ts'
+    eq(M.step_location(other, 40), '~/workspace/other-repo/src/a.ts:40', 'file in another repo: full path')
+    eq(M.step_location('/opt/x/b.py', nil), '/opt/x/b.py:?', 'outside home: absolute path')
 end
 
 return M

@@ -112,14 +112,15 @@ end
 --- @param on_save function|nil # called with the typed lines; default adds a note at target_row
 --- @param on_delete function|nil # deletes the existing note, for `-` in normal mode; nil for a new note
 --- @param status_ops table|nil # {get=fn() -> status, cycle=fn() -> new status} for `@`; nil for a new note
-function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete, status_ops)
+--- @param note table|nil # the menu item being edited, so going back to the menu puts the cursor on it
+function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete, status_ops, note)
     local edit_bufnr = M.create_window()
     if initial then vim.api.nvim_buf_set_lines(edit_bufnr, 0, -1, false, initial) end
     -- Hint in the window's top bar: always visible however the text scrolls, and not part of the note
     -- (a virtual line above line 1 hides as soon as the view scrolls past it)
     local function show_hint()
         -- q and < save the note as they leave (there's no separate save key); - and @ only exist for saved notes
-        local hint = 'Help: q quit | Backspace return to main menu'
+        local hint = 'Help: q quit | <Backspace> return to main menu'
         if on_delete then hint = hint .. ' | - delete this note' end
         if status_ops then
             local status = status_ops.get()
@@ -150,16 +151,19 @@ function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete,
     vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI', 'WinScrolled', 'TextChanged', 'TextChangedI'}, {buffer=edit_bufnr, callback=show_margin})
     on_save = on_save or function(text) utils.set_note(target_bufnr, target_row, text) end
     -- Key: save, then back to the marks list, opened for the file and line the editor was opened from
-    vim.keymap.set('n', '<BS>', function()
+    -- (Backspace, or `[`, which the help line doesn't list)
+    local function back_to_menu()
         local origin = MenuOrigin
         M.save_note(edit_bufnr, target_bufnr, on_save, false, on_delete)
         if origin and vim.api.nvim_win_is_valid(origin.win) and vim.api.nvim_buf_is_valid(origin.bufnr) then
             vim.api.nvim_set_current_win(origin.win)
             vim.api.nvim_win_set_buf(origin.win, origin.bufnr)
             vim.api.nvim_win_set_cursor(origin.win, {math.min(origin.row, vim.api.nvim_buf_line_count(origin.bufnr)), 0})
-            M.openMarks()
+            M.openMarks({focus=note})
         end
-    end, {buffer=edit_bufnr, silent=true, nowait=true})
+    end
+    vim.keymap.set('n', '<BS>', back_to_menu, {buffer=edit_bufnr, silent=true, nowait=true})
+    vim.keymap.set('n', '[', back_to_menu, {buffer=edit_bufnr, silent=true, nowait=true})
     -- Key: delete the note being edited, after a y/n
     if on_delete then
         vim.keymap.set('n', '-', function()
@@ -211,10 +215,11 @@ function M.edit_note(note)
     end, {
         get = function() return note.status or 'open' end,
         cycle = function() return M.cycle_status(note) end,
-    })
+    }, note)
 end
 
 --- @param opt table|nil # {focus=note}: put the cursor on this note instead of on the current line's
+---                       {focus_tour=path}: on this tour (back from a tour)
 function M.openMarks(opt)
     opt = opt or {}
     -- Not from inside one of the plugin's own panels (menu, note editor, tour): `m` there does nothing
@@ -294,13 +299,41 @@ function M.openMarks(opt)
     local number_width = #tostring(#notes)
     local dimmed = {}  -- {window_row=true}: done rows, drawn all in gray
     local i = 0
-    -- Tours (guided marks) found in the repo's tours folder; <CR> on one starts guided mode. Listed above Anchors.
+    -- Tours (guided marks): this worktree's work-files folder, or every worktree's from the main checkout (see
+    -- store.tours_dir); <CR> on one starts guided mode. Listed above Anchors.
     local function render_tours()
-        local tours = require('nvim-marks.tour').list(vim.fs.dirname(store_path))
+        local tour_lib = require('nvim-marks.tour')
+        local dir, worktree = utils.tours_dir(target_bufnr)
+        local tours = tour_lib.list(dir)
         if #tours == 0 then return end
-        section('# Tours (' .. #tours .. ')')
+        -- Tours with a step on the cursor's line, or in the function around it: <Enter> starts them at that step
+        local key = utils.buffer_store(target_bufnr)
+        local abs = vim.fn.resolve(vim.api.nvim_buf_get_name(target_bufnr))
+        local scopes = tour_lib.scopes_at(target_bufnr, target_row)
+        local involved = {}
+        for _, t in ipairs(tours) do
+            local tour = not t.error and tour_lib.load(t.path)
+            local step_id, how = nil, nil
+            if tour then step_id, how = tour_lib.match_step(tour, key, target_row, scopes, abs) end
+            if step_id then
+                local step = tour.steps[step_id]
+                table.insert(involved, {t=t, step=step_id, how=how, title=step.title or step_id})
+            end
+        end
+        if #involved > 0 then
+            section('# Tours involving this line (' .. #involved .. ')')
+            for _, m in ipairs(involved) do
+                table.insert(content_lines, '  ' .. m.t.name)
+                previews[#content_lines] = (m.how == 'line' and 'step: ' or 'step in this function: ') .. m.title
+                marks_metadata[#content_lines] = {type='tour', path=m.t.path, step=m.step}
+            end
+        end
+        section('# Tours (' .. #tours .. ')' .. (worktree and (' · ' .. worktree) or ''))
         for _, t in ipairs(tours) do
             local label = t.error and ('(!) ' .. t.name) or (t.name .. ' (' .. t.steps_count .. ' steps)')
+            -- from the main checkout, say which worktree folder each tour is in
+            local folder = not worktree and t.folder:match('^[^/]+') or nil
+            if folder then label = label .. '  [' .. folder .. ']' end
             table.insert(content_lines, '  ' .. label)
             previews[#content_lines] = t.error or t.description or ''
             marks_metadata[#content_lines] = {type='tour', path=t.path, error=t.error}
@@ -351,13 +384,21 @@ function M.openMarks(opt)
     MarksMetadata[win_bufnr] = marks_metadata
     vim.api.nvim_buf_set_lines(win_bufnr, 0, -1, false, content_lines)
     -- Put the cursor on the note asked for (after @), else on the mark/note of the line we came from, if any
+    local function record_id(n)  -- the store id of a note, whether it's open in a buffer or not
+        if n.extmark_id then return (utils.RecordIds[n.bufnr] or {notes={}}).notes[n.extmark_id] end
+        return n.id
+    end
     local function same_note(a, b)
-        return a.type == 'note' and ((b.extmark_id and a.extmark_id == b.extmark_id and a.bufnr == b.bufnr) or (b.id and a.id == b.id))
+        if a.type ~= 'note' then return false end
+        if b.extmark_id and a.extmark_id == b.extmark_id and a.bufnr == b.bufnr then return true end
+        local id = record_id(b)
+        return id ~= nil and record_id(a) == id  -- e.g. the file was opened meanwhile, so it's now an open-buffer note
     end
     local focused = false
-    if opt.focus then
+    if opt.focus or opt.focus_tour then
         for row = 1, #content_lines do
-            if marks_metadata[row] and same_note(marks_metadata[row], opt.focus) then
+            local item = marks_metadata[row]
+            if item and (opt.focus and same_note(item, opt.focus) or opt.focus_tour and item.type == 'tour' and item.path == opt.focus_tour) then
                 vim.api.nvim_win_set_cursor(0, {row, 0})
                 focused = true
                 break
@@ -455,7 +496,7 @@ function M.openMarks(opt)
             return
         end
         vim.cmd('bwipeout!')  -- back in the code window, then guided mode opens its own panel
-        require('nvim-marks.tour_panel').start(mark.path, target_bufnr, function(n) return M.create_window(n, true) end)
+        require('nvim-marks.tour_panel').start(mark.path, target_bufnr, function(n) return M.create_window(n, true) end, mark.step)
     end
     -- Key: Edit the note under the cursor, or start the tour under it (like <CR>)
     vim.keymap.set('n', EditKey, function()
@@ -531,6 +572,10 @@ function M.cycle_status(note)
         utils.save_all(note.bufnr)
     else
         utils.edit_stored(note.store_path, note.id, nil, status)
+        -- the file may be open by now (the menu's preview opens it): show the new status there, or the menu,
+        -- which lists open files from memory, would still show the old one
+        local bufnr = note.path and vim.fn.bufnr(note.path) or -1
+        if bufnr ~= -1 and IsBufferSetup[bufnr] and vim.api.nvim_buf_is_loaded(bufnr) then utils.reload_from_store(bufnr) end
     end
     note.status = status
     return status

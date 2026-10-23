@@ -435,6 +435,28 @@ function M.relocate_step(step, bufnr, lines)
     return M.relocate_by_commit(info, step, lines)
 end
 
+--- @return string, string|nil # folder to list tours from for this buffer, and the worktree name (see store.tours_dir)
+function M.tours_dir(bufnr)
+    local path, info = locate_store(bufnr)
+    return store.tours_dir(path, info)
+end
+
+--- @return string|nil # HEAD of the checkout `bufnr` is in, short; nil outside a git repo
+function M.head_commit(bufnr)
+    local _, info = locate_store(bufnr)
+    return store.head_commit(info.top)
+end
+
+--- The file as it was at a commit, from a buffer of the same repo. Worktrees share git's objects, so this reads a
+--- commit made on any branch or worktree, not only this checkout's history.
+---
+--- @return string[]|nil # nil when it isn't a git repo, the commit is gone, or the file wasn't in it
+function M.file_at_commit(bufnr, commit, file)
+    local _, info = locate_store(bufnr)
+    if not info.top then return nil end
+    return store.file_at_commit(info.top, commit, file)
+end
+
 --- Restore marks+notes of a buffer from the repo's store
 function M.restore_marks(bufnr)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end
