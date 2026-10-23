@@ -14,7 +14,7 @@ local utils = require('nvim-marks.utils')
 local NS = vim.api.nvim_create_namespace('nvim-marks.tour-panel')
 local NS_Sign = vim.api.nvim_create_namespace('nvim-marks.tour-sign')  -- the ▶ on the step's line in the code window
 local NS_Header = vim.api.nvim_create_namespace('nvim-marks.tour-header')  -- tour name and description, virtual lines on top
-local State = nil  --- @type table|nil # {tour, tree, pos, code_win, panel_buf, origin_bufnr, origin_view, opened, snapshot_buf, rows={panel row = step id}}
+local State = nil  --- @type table|nil # {tour, tree, pos, code_win, panel_buf, origin_bufnr, origin_view, opened, snapshot_buf, intro_buf, rows={panel row = step id}}
 
 --- @return table # the step's anchor, for anchor.locate
 local function step_anchor(step)
@@ -78,8 +78,47 @@ end
 --- step's explanation as virtual lines above it, gone when the tour moves on.
 --- The tour reuses that one window; each file is opened with :edit (an ordinary buffer). A file the tour opened is
 --- closed when it moves to another file, so there's one at a time; files you had open are left alone.
+--- A step without a `file` (usually the root) is the tour's intro page: a read-only markdown buffer in the code
+--- window with the tour's name, description, the step's `text` (paragraphs, the agenda, ...) and the steps ahead as
+--- an agenda, instead of pointing at a line of code.
+local function show_intro(step)
+    local tour = State.tour
+    local lines = {'# ' .. tour.name, ''}
+    if tour.description ~= '' then vim.list_extend(lines, {tour.description, ''}) end
+    if vim.trim(step.text or '') ~= '' then
+        vim.list_extend(lines, vim.split(vim.trim(step.text), '\n', {plain=true}))
+        table.insert(lines, '')
+    end
+    table.insert(lines, '## Agenda')
+    table.insert(lines, '')
+    for _, r in ipairs(State.tree) do
+        if r.id ~= step.id then
+            local s = tour.steps[r.id]
+            table.insert(lines, string.rep('  ', math.max(0, r.depth - 1)) .. '- ' .. (s.title or r.id))
+        end
+    end
+    table.insert(lines, '')
+    table.insert(lines, 'Press n in the tour panel to start.')
+    local buf = State.intro_buf
+    if not (buf and vim.api.nvim_buf_is_valid(buf)) then
+        buf = vim.api.nvim_create_buf(false, true)
+        vim.bo[buf].bufhidden = 'wipe'
+        State.intro_buf = buf
+        pcall(vim.api.nvim_buf_set_name, buf, 'nvim-marks-tour://intro/' .. tour.name)
+    end
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    vim.bo[buf].filetype = 'markdown'  -- the user's own markdown setup
+    utils.show_in_window(State.code_win, buf)
+    if State.opened then utils.close_preview_buffer(State.opened); State.opened = nil end
+    vim.api.nvim_win_set_cursor(State.code_win, {1, 0})
+    vim.api.nvim_win_call(State.code_win, function() vim.wo.wrap = true; vim.wo.linebreak = true end)
+end
+
 local function show_code(step)
     if not vim.api.nvim_win_is_valid(State.code_win) then return end
+    if not step.file then return show_intro(step) end
     local path, row = locate(step)
     local bufnr, opened, note
     if path then
@@ -255,7 +294,7 @@ local function render()
         local marker = r.id == here.id and '▶' or ' '
         local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
         local indent = r.depth > 0 and (string.rep('   ', r.depth - 1) .. '└─ ') or ''
-        local location = M.step_location(step.file, step.row)
+        local location = step.file and M.step_location(step.file, step.row) or 'intro'
         table.insert(lines, string.format('%s %s %s%s%s', marker, number, indent, step.title or r.id, r.shared and ' (shared)' or ''))
         rows[#lines] = r.id
         if r.id == here.id then table.insert(hls, {#lines, 0, -1, 'Title'}) end  -- only the current step stands out
@@ -348,13 +387,15 @@ function M.quit()
     end
     local state = State
     State = nil
-    -- a snapshot left in the code window: put back the file the tour was started from
-    if state.snapshot_buf and vim.api.nvim_buf_is_valid(state.snapshot_buf) then
-        if vim.api.nvim_win_is_valid(state.code_win) and vim.api.nvim_win_get_buf(state.code_win) == state.snapshot_buf
-            and vim.api.nvim_buf_is_valid(state.origin_bufnr) then
-            vim.api.nvim_win_set_buf(state.code_win, state.origin_bufnr)
+    -- a snapshot or the intro page left in the code window: put back the file the tour was started from
+    for _, buf in pairs({state.snapshot_buf or false, state.intro_buf or false}) do  -- either can be missing
+        if buf and vim.api.nvim_buf_is_valid(buf) then
+            if vim.api.nvim_win_is_valid(state.code_win) and vim.api.nvim_win_get_buf(state.code_win) == buf
+                and vim.api.nvim_buf_is_valid(state.origin_bufnr) then
+                vim.api.nvim_win_set_buf(state.code_win, state.origin_bufnr)
+            end
+            if vim.api.nvim_buf_is_valid(buf) then vim.api.nvim_buf_delete(buf, {force=true}) end
         end
-        if vim.api.nvim_buf_is_valid(state.snapshot_buf) then vim.api.nvim_buf_delete(state.snapshot_buf, {force=true}) end
     end
     if vim.api.nvim_buf_is_valid(state.panel_buf) then vim.api.nvim_buf_delete(state.panel_buf, {force=true}) end
 end
