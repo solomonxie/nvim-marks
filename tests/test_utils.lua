@@ -221,6 +221,38 @@ function T.test_save_keeps_changes_made_elsewhere()
     vim.fn.delete(tmp_dir, 'rf')
 end
 
+--- An agent moves a note to another file while nvim has its file open: nvim's next save doesn't pull it back,
+--- and the buffer drops it
+function T.test_save_keeps_note_moved_elsewhere()
+    local tmp_dir = vim.fn.tempname()
+    vim.fn.mkdir(tmp_dir, 'p')
+    marks_file.dir_option = tmp_dir
+    local path = tmp_dir .. '/f.lua'
+    local store_path = tmp_dir .. '/_no_repo/' .. marks_file.FILE_NAME
+    vim.fn.writefile(read_fixture('v1.lua'), path)
+    vim.cmd('edit ' .. path)
+    local bufnr = vim.api.nvim_get_current_buf()
+    M.set_note(bufnr, 8, {'to move'})
+    M.set_note(bufnr, 10, {'stays'})
+    M.save_all(bufnr)
+    vim.uv.sleep(5)  -- a later mtime for the agent's write
+    local records = marks_file.load(store_path)
+    for _, r in ipairs(records) do
+        if r.text[1] == 'to move' then r.file, r.row, r.line = tmp_dir .. '/g.lua', 3, 'x = 1' end
+    end
+    marks_file.save(store_path, records)
+    M.reload_if_changed(bufnr)
+    local moved = vim.tbl_filter(function(r) return r.text[1] == 'to move' end, marks_file.load(store_path))[1]
+    eq({moved.file, moved.row}, {tmp_dir .. '/g.lua', 3}, 'move kept on disk')
+    eq(#marks_file.load(store_path), 2, 'not written back to f.lua')
+    eq(vim.tbl_map(function(n) return n[3][1] end, M.scan_notes(bufnr)), {'stays'}, 'buffer dropped the moved note')
+    M.save_all(bufnr)
+    eq(#marks_file.load(store_path), 2, 'later saves leave it alone')
+    vim.cmd('bwipeout!')
+    marks_file.dir_option = nil
+    vim.fn.delete(tmp_dir, 'rf')
+end
+
 --- A note emptied to nothing or only spaces (in the editor, by an agent or by hand) counts as deleted
 function T.test_empty_note_is_deleted()
     eq(M.is_empty_note({'', '   ', '\t'}), true, 'spaces only')

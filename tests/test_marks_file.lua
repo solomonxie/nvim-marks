@@ -89,6 +89,50 @@ function T.test_merge_file_keeps_text_edited_elsewhere()
     eq(edited[1].text, {'edited in nvim'}, 'edit made here wins')
 end
 
+--- A record moved to another file elsewhere (an agent) while this nvim had it open stays moved
+function T.test_merge_file_keeps_move_elsewhere()
+    local records = M.load(fixture_path('marks.jsonl'))
+    local id = records[1].id
+    local in_nvim = vim.deepcopy(records[1])  -- still in jobs/common.py here
+    local on_disk = vim.deepcopy(records)
+    on_disk[1].file, on_disk[1].row, on_disk[1].line = 'jobs/other.py', 7, 'def other('
+    local loaded = {[id]=records[1].text}
+    local merged, changed = M.merge_file(on_disk, 'jobs/common.py', {in_nvim, records[3]}, {[id]=true, [records[3].id]=true},
+                                         loaded, {[id]=true}, {[id]=false}, {[id]='jobs/common.py'})
+    eq({merged[1].file, merged[1].row, merged[1].line}, {'jobs/other.py', 7, 'def other('}, 'move kept')
+    eq(#merged, 3, 'not written back here as well')
+    eq(changed, false, 'nothing to write')
+end
+
+--- This buffer's file was renamed: the record on disk still has the old key, it moves to the new one
+function T.test_merge_file_follows_rename()
+    local records = M.load(fixture_path('marks.jsonl'))
+    local id = records[1].id
+    local renamed = vim.deepcopy(records[1])
+    renamed.file = 'jobs/shared.py'
+    local merged, changed = M.merge_file(records, 'jobs/shared.py', {renamed}, {[id]=true},
+                                         {[id]=records[1].text}, {[id]=true}, {[id]=false}, {[id]='jobs/common.py'})
+    eq({merged[1].id, merged[1].file}, {id, 'jobs/shared.py'}, 'moved to the new key, same place')
+    eq(changed, true, 'written')
+    local unknown = M.merge_file(records, 'jobs/shared.py', {renamed}, {[id]=true})
+    eq(unknown[1].file, 'jobs/shared.py', 'no loaded file known: still a rename')
+end
+
+--- A note edited here and moved elsewhere meanwhile: the move is kept, with the text and status edited here
+function T.test_merge_file_move_elsewhere_keeps_edit_here()
+    local records = M.load(fixture_path('marks.jsonl'))
+    local id = records[1].id
+    local in_nvim = vim.deepcopy(records[1])
+    in_nvim.text, in_nvim.status = {'why fetch it again?', 'edited here'}, 'todo'
+    local on_disk = vim.deepcopy(records)
+    on_disk[1].file, on_disk[1].row = 'jobs/other.py', 7
+    local merged, changed = M.merge_file(on_disk, 'jobs/common.py', {in_nvim}, {[id]=true},
+                                         {[id]=records[1].text}, {[id]=true}, {[id]=false}, {[id]='jobs/common.py'})
+    eq({merged[1].file, merged[1].row}, {'jobs/other.py', 7}, 'location from the move')
+    eq({merged[1].text, merged[1].status}, {in_nvim.text, 'todo'}, 'text and status from here')
+    eq(changed, true, 'written')
+end
+
 function T.test_convert_old_json()
     local records = convert_old_json(fixture_path('marks-history-v3.json'))
     eq(#records, 2, 'every note and mark converted')

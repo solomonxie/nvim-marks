@@ -308,12 +308,38 @@ end
 --- @param on_disk table<string, boolean>|nil # ids this nvim has loaded from or saved to the store
 --- @param loaded_statuses table<string, string|false>|nil # {id=status} as last loaded or saved (false: none)
 --- @return table[], boolean # merged records, whether anything changed
-function M.merge_file(records, file, current, known, loaded_texts, on_disk, loaded_statuses)
+function M.merge_file(records, file, current, known, loaded_texts, on_disk, loaded_statuses, loaded_files)
     local by_id = {}
     for _, record in ipairs(current) do by_id[record.id] = record end
+--- A record in `current` that's saved under another file on disk is one of two things, told apart by `loaded_files`:
+--- - renamed: it's still under the file key this nvim last loaded or saved it under, so this buffer's file was
+---   renamed (e.g. `git mv`): this buffer's copy is written, under the new key, in the same place.
+--- - moved elsewhere: its file on disk isn't that key, so someone (an agent, another nvim) moved it to another file
+---   since: the move is kept and this buffer's copy isn't written back (the buffer then reloads without it).
+---   A text or status edited here since loading is carried onto the moved record, so the edit isn't lost: it ends
+---   up in the note at its new file. Untouched text and status stay as they are on disk.
+--- Without an entry in `loaded_files` (or without `loaded_files`), it's taken as a rename.
+---
     local merged, changed, seen = {}, false, {}
+--- @param loaded_files table<string, string>|nil # {id=file} the file key each record had when last loaded or saved
     for _, record in ipairs(records) do
-        if record.file ~= file and by_id[record.id] then
+        local loaded_file = loaded_files and loaded_files[record.id]
+        if record.file ~= file and by_id[record.id] and loaded_file and record.file ~= loaded_file then
+            -- moved to another file elsewhere: keep it there, with any text/status edited here carried along
+            local here, kept = by_id[record.id], record
+            local loaded = loaded_texts and loaded_texts[record.id]
+            if here.kind == 'note' and loaded and not vim.deep_equal(here.text, loaded) then
+                kept = vim.tbl_extend('force', kept, {text=here.text})
+            end
+            local loaded_status = loaded_statuses and loaded_statuses[record.id]
+            if here.kind == 'note' and loaded_status ~= nil and (here.status or false) ~= loaded_status then
+                kept = vim.deepcopy(kept)
+                kept.status = here.status
+            end
+            if kept ~= record then changed = true end
+            table.insert(merged, kept)
+            seen[record.id] = true
+        elseif record.file ~= file and by_id[record.id] then
             table.insert(merged, by_id[record.id])  -- its file was renamed to this one: moved here, same place
             seen[record.id] = true
             changed = true

@@ -18,6 +18,7 @@ M.OnDisk = {}  --- @type table<integer, table<string, boolean>> # {bufnr={id=tru
 M.LoadedAt = {}  --- @type table<integer, integer> # {bufnr=store mtime when its notes were last loaded or saved}
 M.LoadedTexts = {}  --- @type table<integer, table<string, string[]>> # {bufnr={id=text}}, notes as last loaded or saved, to tell our edits from others'
 
+M.LoadedFiles = {}  --- @type table<integer, table<string, string>> # {bufnr={id=file}}: file key as last loaded or saved, to tell a rename of this file from a move elsewhere
 local ValidMarkChars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 function M.is_real_file(bufnr)
@@ -322,9 +323,14 @@ function M.save_all(bufnr)
     M.LoadedTexts[bufnr] = M.LoadedTexts[bufnr] or {}
     M.OnDisk[bufnr] = M.OnDisk[bufnr] or {}
     M.LoadedStatuses[bufnr] = M.LoadedStatuses[bufnr] or {}
-    local records, changed = marks_file.merge_file(marks_file.load(store_path), key, current, ids.known, M.LoadedTexts[bufnr], M.OnDisk[bufnr], M.LoadedStatuses[bufnr])
+    M.LoadedFiles[bufnr] = M.LoadedFiles[bufnr] or {}
+    local records, changed = marks_file.merge_file(marks_file.load(store_path), key, current, ids.known, M.LoadedTexts[bufnr],
+                                                   M.OnDisk[bufnr], M.LoadedStatuses[bufnr], M.LoadedFiles[bufnr])
     for _, record in ipairs(records) do
-        if record.file == key then M.OnDisk[bufnr][record.id] = true end
+        if record.file == key then
+            M.OnDisk[bufnr][record.id] = true
+            M.LoadedFiles[bufnr][record.id] = key
+        end
     end
     for _, item in ipairs(current) do
         if item.kind == 'note' then
@@ -475,7 +481,11 @@ function M.restore_marks(bufnr)
     M.Orphans[bufnr] = {}
     M.LoadedTexts[bufnr] = {}
     M.OnDisk[bufnr] = {}
-    for _, record in ipairs(records) do M.OnDisk[bufnr][record.id] = true end
+    M.LoadedFiles[bufnr] = {}
+    for _, record in ipairs(records) do
+        M.OnDisk[bufnr][record.id] = true
+        M.LoadedFiles[bufnr][record.id] = record.old_file or record.file  -- a renamed file's records: still its old key on disk
+    end
     M.LoadedAt[bufnr] = marks_file.mtime(store_path)
     if #records == 0 then
         local legacy = marks_file.load_legacy(info, key)
