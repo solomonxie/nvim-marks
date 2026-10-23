@@ -1,4 +1,5 @@
---- One JSONL file per repo holds the marks and notes of all its files, shared by every worktree and branch.
+--- The marks file: one JSONL file per repo holds the marks and notes of all its files, shared by every worktree and
+--- branch. This module reads, writes and merges it, keeps its change log, and knows the marks folder's layout.
 ---
 --- Location: `<dir>/<repo>/marks.jsonl`, <dir> from setup({dir=...}) or g:nvim_marks_dir, default `stdpath('data')/nvim-marks`.
 --- <repo> is the folder name of the repo's main checkout, the same for all its worktrees.
@@ -11,17 +12,19 @@
 --- `text` is the note, its lines joined with `\n`. `row`, `line`, `above`, `below` are the anchor (see anchor.lua). A record whose line can't be found in the current
 --- version of the file (e.g. on another branch) is left as it is until it's found again or deleted.
 --- `commit` is HEAD (12 characters) when the anchor was last written: when the anchor isn't found, the row is carried
---- through the diff from that commit's version of the file, and a renamed file is followed (see utils.lua).
+--- through the diff from that commit's version of the file, and a renamed file is followed (see utils.lua; git questions are in git.lua).
 
 local M = {}
+
+local git = require('nvim-marks.git')
 
 M.DEFAULT_DIR = vim.fn.stdpath('data') .. '/nvim-marks'
 M.dir_option = nil  --- @type string|nil # set by setup()
 M.FILE_NAME = 'marks.jsonl'
 M.LOG_FILE_NAME = 'marks-log.jsonl'  -- next to the store: every add/update/delete, appended, never rewritten
+local KnownRoots = {}  --- @type table<string, table<string, boolean>> # {store_path={root=true}}: checkouts seen this session
 local OLD_FILE_NAME = 'marks-history.json'  -- previous format, read once when there's no marks.jsonl yet
 local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line', 'above', 'below', 'commit'}
-M.COMMIT_LEN = 12  -- git lengthens its own short hashes as a repo grows, 7 can turn ambiguous
 
 --- A note's status, in the order `@` cycles through them and the marks list shows them
 M.STATUSES = {'open', 'todo', 'anchor', 'done'}
@@ -55,40 +58,6 @@ function M.status_from_prefixes(record)
         record.status = status
     end
     return record
-end
-
-local RepoCache = {}  --- @type table<string, table> # {dir={top, repo}}
-local KnownRoots = {}  --- @type table<string, table<string, boolean>> # {store_path={root=true}}: checkouts seen this session
-local WorktreeCache = {}  --- @type table<string, string[]> # {root={worktree root, ...}}
-
---- @param path string # absolute file path
---- @return table # {top=repo root or nil, repo=string}
-function M.repo_info(path)
-    local dir = vim.fs.dirname(path)
-    if RepoCache[dir] then return RepoCache[dir] end
-    local cmd = {'git', '-C', dir, 'rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir'}
-    local obj = vim.system(cmd, {text=true}):wait()
-    local info = {top=nil, repo='_no_repo'}
-    if obj.code == 0 then
-        local top, common_dir = unpack(vim.split(vim.trim(obj.stdout), '\n'))
-        info = {top=top, repo=M.repo_name(top, common_dir)}
-    end
-    RepoCache[dir] = info
-    return info
-end
-
---- Name of a repo, the same in every worktree: the folder name of its main checkout
----
---- @param top string # this checkout's root
---- @param common_dir string # git dir shared by all worktrees
-function M.repo_name(top, common_dir)
-    if vim.fs.basename(common_dir) == '.git' then
-        return vim.fs.basename(vim.fs.dirname(common_dir))  -- `<main>/.git`
-    end
-    if vim.fs.basename(common_dir):match('^%.') then
-        return vim.fs.basename(top)  -- separate git dir like `~/.dot.git` for `~/dot`: name it after the checkout
-    end
-    return (vim.fs.basename(common_dir):gsub('%.git$', ''))  -- bare repo `myapp.git`
 end
 
 --- Work files kept under the marks folder (`<dir>/<repo>/...`) belong with that repo's marks
@@ -127,21 +96,6 @@ function M.remember_root(store_path, root)
     KnownRoots[store_path][root] = true
 end
 
---- @return string[] # roots of every worktree of the git repo at `root` (empty when it isn't one)
-local function worktrees(root)
-    if WorktreeCache[root] then return WorktreeCache[root] end
-    local roots = {}
-    local obj = vim.system({'git', '-C', root, 'worktree', 'list', '--porcelain'}, {text=true}):wait()
-    if obj.code == 0 then
-        for _, line in ipairs(vim.split(obj.stdout, '\n')) do
-            local wt = line:match('^worktree (.+)')
-            if wt then table.insert(roots, vim.fn.resolve(wt)) end
-        end
-    end
-    WorktreeCache[root] = roots
-    return roots
-end
-
 --- Folders a repo's saved `file` paths can be relative to, best first: this buffer's checkout, the checkout
 --- nvim's cwd is in, other checkouts seen this session and every worktree of them, then the repo's work-files folder
 --- (notes on work files are relative to that). Paths aren't tied to the cwd or to one checkout.
@@ -156,80 +110,16 @@ function M.candidate_roots(store_path, info)
         end
     end
     add(info.top)
-    local cwd_info = M.repo_info(vim.fn.getcwd() .. '/.')
+    local cwd_info = git.repo_info(vim.fn.getcwd() .. '/.')
     if cwd_info.top and M.store_path(cwd_info) == store_path then add(cwd_info.top) end
     local known = vim.tbl_keys(KnownRoots[store_path] or {})
     table.sort(known)
     for _, root in ipairs(known) do add(root) end
     for _, root in ipairs(vim.list_slice(roots)) do
-        for _, wt in ipairs(worktrees(root)) do add(wt) end
+        for _, wt in ipairs(git.worktrees(root)) do add(wt) end
     end
     if info.repo ~= '_no_repo' then add(marks_dir() .. '/' .. info.repo) end
     return roots
-end
-
-local HeadCache = {}  --- @type table<string, table> # {top={commit, at}}: HEAD, read again after HEAD_TTL_NS
-local HEAD_TTL_NS = 2e9
-local FileAtCommit = {}  --- @type table<string, string[]|false> # {'top|commit|file'=lines}, a commit never changes
-local RenameCache = {}  --- @type table<string, table> # {'top|commit|head'={old path=new path}}
-
---- @param top string|nil # repo root
---- @return string|nil # HEAD, short; nil outside a git repo (e.g. work files), or before the first commit
-function M.head_commit(top)
-    if not top then return nil end
-    local now = vim.uv.hrtime()
-    local cached = HeadCache[top]
-    if cached and now - cached.at < HEAD_TTL_NS then return cached.commit or nil end
-    local obj = vim.system({'git', '-C', top, 'rev-parse', '--show-toplevel', 'HEAD'}, {text=true}):wait()
-    local commit = false
-    if obj.code == 0 then
-        local toplevel, head = unpack(vim.split(vim.trim(obj.stdout), '\n'))
-        -- A folder inside another repo (the work-files folder in a dotfiles repo): paths aren't from that repo's root
-        if vim.fn.resolve(toplevel) == vim.fn.resolve(top) and head then commit = head:sub(1, M.COMMIT_LEN) end
-    end
-    HeadCache[top] = {commit=commit, at=now}
-    return commit or nil
-end
-
---- @return string[]|nil # the file's lines at `commit`, nil when the commit is gone (rebased away) or hadn't the file
-function M.file_at_commit(top, commit, file)
-    local key = top .. '|' .. commit .. '|' .. file
-    if FileAtCommit[key] == nil then
-        local obj = vim.system({'git', '-C', top, 'show', commit .. ':' .. file}, {text=true}):wait()
-        FileAtCommit[key] = obj.code == 0 and vim.split(obj.stdout:gsub('\n$', ''), '\n', {plain=true}) or false
-    end
-    return FileAtCommit[key] or nil
-end
-
-local AncestorCache = {}  --- @type table<string, boolean> # {'top|commit|head'=is ancestor}
-
---- @return boolean # `commit` is in HEAD's history. A note saved on another branch isn't: its line may still be there,
----                   so it stays an orphan instead of being moved by a diff against an unrelated version
-function M.is_ancestor(top, commit)
-    local head = M.head_commit(top)
-    if not head then return false end
-    local key = top .. '|' .. commit .. '|' .. head
-    if AncestorCache[key] == nil then
-        local obj = vim.system({'git', '-C', top, 'merge-base', '--is-ancestor', commit, 'HEAD'}):wait()
-        AncestorCache[key] = obj.code == 0
-    end
-    return AncestorCache[key]
-end
-
---- @return table<string, string> # {old path=new path} for files renamed since `commit`, up to the working tree
-function M.renames_since(top, commit)
-    local key = top .. '|' .. commit .. '|' .. (M.head_commit(top) or '')
-    if RenameCache[key] then return RenameCache[key] end
-    local renames = {}
-    local obj = vim.system({'git', '-C', top, 'diff', '-M', '--name-status', '--diff-filter=R', commit, '--'}, {text=true}):wait()
-    if obj.code == 0 then
-        for _, line in ipairs(vim.split(obj.stdout, '\n')) do
-            local old, new = line:match('^R%d*\t([^\t]+)\t([^\t]+)$')
-            if old then renames[old] = new end
-        end
-    end
-    RenameCache[key] = renames
-    return renames
 end
 
 --- @return string # path from the repo root, or the absolute path outside a repo
@@ -508,151 +398,6 @@ function M.load_legacy(info, key)
     return legacy
 end
 
-
---- Tests: `nvim -l tests/run.lua`
-local function fixture_path(name)
-    return vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2)) .. '/../../tests/fixtures/' .. name
-end
-
-local function eq(actual, expected, msg)
-    assert(vim.deep_equal(actual, expected), string.format('%s: expected %s, got %s', msg, vim.inspect(expected), vim.inspect(actual)))
-end
-
-function M.test_store_path()
-    local info = {top='/w/myapp-fix', repo='myapp'}
-    M.dir_option = '/marks'
-    eq(M.store_path(info), '/marks/myapp/marks.jsonl', 'dir')
-    M.dir_option = nil
-end
-
-function M.test_repo_name()
-    eq(M.repo_name('/w/myapp-fix', '/w/myapp/.git'), 'myapp', 'worktree of a normal repo')
-    eq(M.repo_name('/home/me/dot', '/home/me/.dot.git'), 'dot', 'separate hidden git dir')
-    eq(M.repo_name('/w/myapp-wt', '/srv/myapp.git'), 'myapp', 'bare repo')
-end
-
-function M.test_tours_dir()
-    M.dir_option = '/notes'
-    eq({M.tours_dir('/w/myapp-fix/a.lua', {top='/w/myapp-fix', repo='myapp'})}, {'/notes/myapp/myapp-fix', 'myapp-fix'}, 'worktree: its own folder')
-    eq({M.tours_dir('/w/myapp/a.lua', {top='/w/myapp', repo='myapp'})}, {'/notes/myapp'}, 'main checkout: the whole repo')
-    eq({M.tours_dir('/notes/myapp/myapp-fix/plan.md', {top='/notes/myapp', repo='myapp'})}, {'/notes/myapp'}, 'work file: the whole repo')
-    M.dir_option = nil
-end
-
-function M.test_work_files_repo()
-    M.dir_option = '/notes'
-    eq(M.work_files_repo('/notes/myapp/myapp-fix-login/plan.md'), {top='/notes/myapp', repo='myapp'}, 'work file')
-    eq(M.work_files_repo('/notes/nvim-marks-README.md'), nil, 'file directly in the folder')
-    eq(M.work_files_repo('/w/myapp/a.lua'), nil, 'outside the folder')
-    M.dir_option = nil
-end
-
-function M.test_file_key()
-    local info = {top='/w/myapp'}
-    eq(M.file_key('/w/myapp/src/a.lua', info), 'src/a.lua', 'inside repo')
-    eq(M.file_key('/other/b.lua', info), '/other/b.lua', 'outside repo')
-end
-
-function M.test_load_and_encode()
-    local records = M.load(fixture_path('marks.jsonl'))
-    eq(#records, 3, 'one record per line')
-    eq(records[1].text, {'why fetch it again?'}, 'note text')
-    eq(records[3].text, {'two', 'lines'}, 'one string in the file, lines in memory')
-    eq(records[3].line, '    return "job"', 'code line as it was')
-    local lines = vim.fn.readfile(fixture_path('marks.jsonl'))
-    for i, record in ipairs(records) do eq(M.encode_record(record), lines[i], 'line ' .. i .. ' written back as it was') end
-end
-
-function M.test_merge_file_keeps_places()
-    local records = M.load(fixture_path('marks.jsonl'))
-    local moved = vim.deepcopy(records[1])
-    moved.row = 30
-    local added = {id='99999999', file='jobs/common.py', kind='mark', char='z', row=1, line='import os', above={}, below={}}
-    -- jobs/common.py now has: note 1 moved, note 3 deleted, a new mark
-    local known = {[records[1].id]=true, [records[3].id]=true}
-    local merged, changed = M.merge_file(records, 'jobs/common.py', {moved, added}, known)
-    eq(changed, true, 'changed')
-    eq(vim.tbl_map(function(r) return r.id end, merged), {records[1].id, records[2].id, '99999999'}, 'moved in place, deleted removed, new appended')
-    eq(merged[1].row, 30, 'moved row')
-    local _, unchanged = M.merge_file(records, 'jobs/common.py', {records[1], records[3]}, known)
-    eq(unchanged, false, 'nothing changed')
-    -- note 3 was added by another nvim after this one loaded the file: not deleted
-    local kept = M.merge_file(records, 'jobs/common.py', {records[1]}, {[records[1].id]=true})
-    eq(#kept, 3, 'record added elsewhere is kept')
-    -- note 3 was deleted by an agent after this nvim loaded it: not written back
-    local on_disk_now = {records[1], records[2]}
-    local after = M.merge_file(on_disk_now, 'jobs/common.py', {records[1], records[3]}, known,
-                               {[records[3].id]=records[3].text}, {[records[1].id]=true, [records[3].id]=true})
-    eq(#after, 2, 'record deleted elsewhere stays deleted')
-end
-
---- A note edited elsewhere while this nvim had it open is kept, unless this nvim edited it too
-function M.test_merge_file_keeps_text_edited_elsewhere()
-    local records = M.load(fixture_path('marks.jsonl'))
-    local id = records[1].id
-    local in_nvim = vim.deepcopy(records[1])
-    local on_disk = vim.deepcopy(records)
-    on_disk[1].text = vim.list_extend(vim.deepcopy(records[1].text), {'--', 'Bot reply:', 'answer'})
-    local loaded = {[id]=records[1].text}
-    local merged, changed = M.merge_file(on_disk, 'jobs/common.py', {in_nvim, records[3]}, {[id]=true}, loaded)
-    eq(merged[1].text, on_disk[1].text, 'reply written elsewhere kept')
-    eq(changed, false, 'nothing to write')
-    in_nvim.text = {'edited in nvim'}
-    local edited = M.merge_file(on_disk, 'jobs/common.py', {in_nvim, records[3]}, {[id]=true}, loaded)
-    eq(edited[1].text, {'edited in nvim'}, 'edit made here wins')
-end
-
-function M.test_convert_old_json()
-    local records = convert_old_json(fixture_path('marks-history-v3.json'))
-    eq(#records, 2, 'every note and mark converted')
-    eq({records[1].kind, records[1].text, records[1].row}, {'note', {'one', 'two'}, 2}, 'note')
-    eq({records[2].file, records[2].kind, records[2].char}, {'a.lua', 'mark', 'b'}, 'orphan mark')
-    eq(#records[2].above, 1, 'v2 context lines turned into hashes')
-end
-
-function M.test_new_id_unique()
-    local seen = {}
-    for _ = 1, 2000 do
-        local id = M.new_id()
-        assert(not seen[id], 'duplicate id ' .. id)
-        seen[id] = true
-    end
-end
-
-function M.test_append_log()
-    local tmp_dir = vim.fn.tempname()
-    local store_path = tmp_dir .. '/' .. M.FILE_NAME
-    local a = {id='aaaa0001', file='src/a.lua', kind='note', text={'why?'}, row=3, line='x = 1', above={}, below={}}
-    local b = {id='bbbb0002', file='src/a.lua', kind='mark', char='a', row=5, line='y = 2', above={}, below={}}
-    M.save(store_path, {a, b})
-    local a2 = vim.deepcopy(a)
-    a2.status = 'todo'
-    a2.text = {'why?', '--', 'Bot reply:', 'because'}
-    M.save(store_path, {a2})  -- a updated, b deleted
-    M.save(store_path, {a2})  -- no change: nothing logged
-    local log = vim.tbl_map(vim.json.decode, vim.fn.readfile(M.log_path(store_path)))
-    eq(vim.tbl_map(function(e) return e.op .. ' ' .. e.id end, log), {'add aaaa0001', 'add bbbb0002', 'update aaaa0001', 'delete bbbb0002'}, 'one line per change')
-    eq(log[3].before.text, 'why?', 'update keeps the old text')
-    eq(log[3].after.text, 'why?\n--\nBot reply:\nbecause', 'and the new text')
-    eq(log[3].after.status, 'todo', 'and the new status')
-    eq(log[4].before.char, 'a', 'delete keeps the whole record')
-    eq(log[1].ts:match('^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$') ~= nil, true, 'UTC timestamp with ms')
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
-function M.test_status_from_prefixes()
-    local function conv(text) return M.status_from_prefixes({kind='note', text=text}) end
-    eq(conv({'(⏺) why?', '--', 'Bot reply:'}), {kind='note', status='todo', text={'why?', '--', 'Bot reply:'}}, 'todo')
-    eq(conv({'(ok) what is it?'}), {kind='note', status='done', text={'what is it?'}}, 'ok = done')
-    eq(conv({'(#) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'anchor')
-    eq(conv({'(-) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'old anchor symbol')
-    eq(conv({'(ok) (⏺) why?'}), {kind='note', status='done', text={'why?'}}, 'done wins over todo')
-    eq(M.status_from_prefixes({kind='note', status='read', text={'x'}}).status, 'done', 'old read status renamed')
-    eq(M.status_from_prefixes({kind='note', status='answered', text={'x'}}).status, 'todo', 'old answered status renamed')
-    eq(M.status_from_prefixes({kind='note', status='archived', text={'x'}}).status, 'done', 'old archived status renamed')
-    eq(conv({'(note) not a status'}), {kind='note', text={'(note) not a status'}}, 'unknown tag left in the text')
-    eq(conv({'plain'}), {kind='note', text={'plain'}}, 'no prefix: no status (open)')
-    eq(M.status_from_prefixes({kind='note', status='open', text={'(⏺) x'}}).text, {'(⏺) x'}, 'has a status already: untouched')
-end
+M.convert_old_json = convert_old_json  -- for tests
 
 return M

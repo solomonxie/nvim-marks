@@ -1,13 +1,17 @@
--- Runs every `test_*` function in the plugin's modules: nvim -l tests/run.lua
-local root = vim.fs.dirname(vim.fs.dirname(vim.fs.normalize(arg[0] and vim.fn.fnamemodify(arg[0], ':p') or '')))
-vim.opt.rtp:prepend(root)
+-- Runs every test in tests/test_*.lua: nvim -l tests/run.lua
+local tests_dir = vim.fs.dirname(vim.fs.normalize(vim.fn.fnamemodify(arg[0], ':p')))
+vim.opt.rtp:prepend(vim.fs.dirname(tests_dir))
+package.path = tests_dir .. '/?.lua;' .. package.path
 local failed = 0
-for _, name in ipairs({'nvim-marks.anchor', 'nvim-marks.store', 'nvim-marks.utils', 'nvim-marks.tour', 'nvim-marks.tour_panel', 'nvim-marks'}) do
-    local mod = require(name)
-    local names = vim.tbl_filter(function(k) return k:match('^test_') end, vim.tbl_keys(mod))
+local files = vim.fn.glob(tests_dir .. '/test_*.lua', false, true)
+table.sort(files)
+for _, file in ipairs(files) do
+    local name = vim.fn.fnamemodify(file, ':t:r')
+    local tests = require(name)
+    local names = vim.tbl_keys(tests)
     table.sort(names)
     for _, fn in ipairs(names) do
-        local ok, err = pcall(mod[fn])
+        local ok, err = pcall(tests[fn])
         print(string.format('%s %s.%s%s', ok and 'PASS' or 'FAIL', name, fn, ok and '' or ('\n    ' .. tostring(err))))
         if not ok then failed = failed + 1 end
     end

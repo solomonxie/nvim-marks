@@ -1,7 +1,7 @@
 --- NOTE:
 --- 1. We use native Vimmarks for marks, we use extmarks for notes
 --- 2. We try not to disrupt native vimmarks key bindings, will just forward the keystroke
---- 3. We save all info into one file per repo (shared by its worktrees), see store.lua; lines are re-found with anchor.lua
+--- 3. We save all info into one file per repo (shared by its worktrees), see marks_file.lua; lines are re-found with anchor.lua
 --- 4. For vim global marks (A-Z), the problem is that we cannot restore the mark without opening the file,
 ---    which is tricky because we don't want to open a buffer which may trigger other plugin reactions.
 ---    An easier way: we only restore marks upon BufEnter, if user wants to jump to global marks, has to jump from Marks window,
@@ -124,7 +124,7 @@ function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete,
         if on_delete then hint = hint .. ' | - delete this note' end
         if status_ops then
             local status = status_ops.get()
-            local symbol = require('nvim-marks.store').STATUS_SYMBOLS[status]
+            local symbol = require('nvim-marks.marks_file').STATUS_SYMBOLS[status]
             hint = (symbol ~= '' and symbol .. ' ' or '') .. StatusTitles[status] .. ' | ' .. hint .. ' | @ change status'
         end
         vim.wo.winbar = '%#Comment#' .. hint:gsub('%%', '%%%%')
@@ -300,7 +300,7 @@ function M.openMarks(opt)
     local dimmed = {}  -- {window_row=true}: done rows, drawn all in gray
     local i = 0
     -- Tours (guided marks): this worktree's work-files folder, or every worktree's from the main checkout (see
-    -- store.tours_dir); <CR> on one starts guided mode. Listed above Anchors.
+    -- marks_file.tours_dir); <CR> on one starts guided mode. Listed above Anchors.
     local function render_tours()
         local tour_lib = require('nvim-marks.tour')
         local dir, worktree = utils.tours_dir(target_bufnr)
@@ -748,7 +748,7 @@ function M.toggleNoteText(hide)
     vim.api.nvim_echo({{'nvim-marks: note text ' .. (shown and 'shown' or 'hidden'), 'Normal'}}, false, {})
 end
 
---- @param opt table|nil # {dir=string} folder where marks are saved (see store.lua)
+--- @param opt table|nil # {dir=string} folder where marks are saved (see marks_file.lua)
 ---                         {reload_interval=10} seconds between checks for changes from elsewhere, 0 turns it off
 ---                         {height=0.4} panel max height: a share of the screen (< 1) or a number of lines; it fits its content up to that
 ---                         {note_style='inline'|'above'} notes at the end of the line (default) or on lines above it
@@ -759,21 +759,13 @@ function M.setup(opt)
     if opt.note_style then utils.note_style = opt.note_style end
     if opt.note_prefix then utils.note_prefix = opt.note_prefix end
     if opt.show_note_text ~= nil then utils.toggle_note_text(opt.show_note_text) end
-    if opt.dir then require('nvim-marks.store').dir_option = opt.dir end
+    if opt.dir then require('nvim-marks.marks_file').dir_option = opt.dir end
     if opt.reload_interval then M.start_auto_reload(opt.reload_interval * 1000) end
     if opt.height then vim.g.nvim_marks_height = opt.height end
 end
 
 M.start_auto_reload((vim.g.nvim_marks_reload_interval or 10) * 1000)
 
-
---- Tests: `nvim -l tests/run.lua`
-function M.test_fit()
-    local function eq(a, b, msg) assert(a == b, msg .. ': expected ' .. vim.inspect(b) .. ', got ' .. vim.inspect(a)) end
-    eq(fit('short', 8), 'short   ', 'padded')
-    eq(fit('exactly8', 8), 'exactly8', 'fits exactly')
-    eq(fit(string.rep('a', 500), 10), string.rep('a', 9) .. '…', 'long text cut with …')
-    eq(vim.fn.strdisplaywidth(fit('中文中文中文中文', 7)), 7, 'wide characters still fit the width')
-end
+M.fit = fit  -- for tests
 
 return M

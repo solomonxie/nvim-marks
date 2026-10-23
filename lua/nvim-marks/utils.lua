@@ -1,7 +1,8 @@
 local M = {}
 
 local anchor = require('nvim-marks.anchor')
-local store = require('nvim-marks.store')
+local marks_file = require('nvim-marks.marks_file')
+local git = require('nvim-marks.git')
 
 M.NS_Signs = vim.api.nvim_create_namespace('nvim-marks.signs')
 M.NS_Notes = vim.api.nvim_create_namespace('nvim-marks.notes')
@@ -37,9 +38,9 @@ end
 --- @return string, table, string # absolute path (symlinks resolved), repo info, store file
 local function locate_store(bufnr)
     local path = vim.fn.resolve(vim.api.nvim_buf_get_name(bufnr))
-    local info = store.work_files_repo(path) or store.repo_info(path)
-    local store_path = store.store_path(info)
-    store.remember_root(store_path, info.top)
+    local info = marks_file.work_files_repo(path) or git.repo_info(path)
+    local store_path = marks_file.store_path(info)
+    marks_file.remember_root(store_path, info.top)
     return path, info, store_path
 end
 
@@ -51,7 +52,7 @@ end
 function M.resolve_file(file, bufnr)
     if vim.startswith(file, '/') then return file, vim.fn.filereadable(file) == 1 end
     local _, info, store_path = locate_store(bufnr)
-    local roots = store.candidate_roots(store_path, info)
+    local roots = marks_file.candidate_roots(store_path, info)
     for _, root in ipairs(roots) do
         local path = root .. '/' .. file
         if vim.fn.filereadable(path) == 1 then return path, true end
@@ -77,7 +78,7 @@ end
 
 --- @return string # path from its repo root (e.g. `src/a.lua`), or with `~` outside a repo; never relative to the cwd
 function M.display_name(path)
-    local info = store.work_files_repo(path) or store.repo_info(path)
+    local info = marks_file.work_files_repo(path) or git.repo_info(path)
     if info.top and vim.startswith(path, info.top .. '/') then return path:sub(#info.top + 2) end
     return vim.fn.fnamemodify(path, ':~')
 end
@@ -127,7 +128,7 @@ end
 
 --- @return string # `(⏺) `-style symbol for a status, with a trailing space; empty for open notes
 function M.status_prefix(status)
-    local symbol = store.STATUS_SYMBOLS[status or 'open'] or ''
+    local symbol = marks_file.STATUS_SYMBOLS[status or 'open'] or ''
     return symbol ~= '' and (symbol .. ' ') or ''
 end
 
@@ -165,7 +166,7 @@ end
 
 --- @return string # the status after `status` in the cycle (open → todo → anchor → done → open)
 function M.next_status(status)
-    local list = store.STATUSES
+    local list = marks_file.STATUSES
     for i, s in ipairs(list) do
         if s == (status or 'open') then return list[i % #list + 1] end
     end
@@ -216,7 +217,7 @@ function M.set_note(bufnr, row, text, record_id, status)
     -- Shown text is joined for display, keep the original lines for saving and editing
     M.NoteTexts[bufnr] = M.NoteTexts[bufnr] or {}
     M.NoteTexts[bufnr][mark_id] = text
-    ids_of(bufnr).notes[mark_id] = track(bufnr, record_id or store.new_id())
+    ids_of(bufnr).notes[mark_id] = track(bufnr, record_id or marks_file.new_id())
     return mark_id
 end
 
@@ -259,7 +260,7 @@ end
 --- Create a vimmark
 function M.set_vimmark(bufnr, char, row)
     vim.api.nvim_buf_set_mark(bufnr, char, row, 0, {})
-    ids_of(bufnr).marks[char] = track(bufnr, store.new_id())  -- a mark set again is a new record
+    ids_of(bufnr).marks[char] = track(bufnr, marks_file.new_id())  -- a mark set again is a new record
     -- A mark set again replaces its orphan
     M.Orphans[bufnr] = vim.tbl_filter(function(o) return o.char ~= char end, M.Orphans[bufnr] or {})
 end
@@ -294,10 +295,10 @@ function M.save_all(bufnr)
     -- (BufReadPre): there's nothing to anchor to, and saving would overwrite every anchor with blank lines
     if vim.api.nvim_buf_line_count(bufnr) <= 1 and vim.api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] == '' then return end
     local path, info, store_path = locate_store(bufnr)
-    local key = store.file_key(path, info)
+    local key = marks_file.file_key(path, info)
     local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
     local ids = ids_of(bufnr)
-    local commit = store.head_commit(info.top)
+    local commit = git.head_commit(info.top)
     local function record(id, kind, row, extra)
         local a = anchor.make(lines, row)
         return vim.tbl_extend('force', {id=id, file=key, kind=kind, row=a.row, line=a.line, above=a.above, below=a.below, commit=commit}, extra)
@@ -307,12 +308,12 @@ function M.save_all(bufnr)
     vim.list_extend(marks, scan_buffer_global_marks(bufnr))
     for _, item in ipairs(marks) do
         local char, row = unpack(item)
-        ids.marks[char] = ids.marks[char] or track(bufnr, store.new_id())  -- set with `:mark`, not through the menu
+        ids.marks[char] = ids.marks[char] or track(bufnr, marks_file.new_id())  -- set with `:mark`, not through the menu
         table.insert(current, record(ids.marks[char], 'mark', row, {char=char}))
     end
     for _, item in ipairs(M.scan_notes(bufnr)) do
         local mark_id, row, text, status = unpack(item)
-        ids.notes[mark_id] = ids.notes[mark_id] or track(bufnr, store.new_id())
+        ids.notes[mark_id] = ids.notes[mark_id] or track(bufnr, marks_file.new_id())
         table.insert(current, record(ids.notes[mark_id], 'note', row, {text=text, status=status}))
     end
     vim.list_extend(current, M.Orphans[bufnr] or {})  -- saved as they were
@@ -321,7 +322,7 @@ function M.save_all(bufnr)
     M.LoadedTexts[bufnr] = M.LoadedTexts[bufnr] or {}
     M.OnDisk[bufnr] = M.OnDisk[bufnr] or {}
     M.LoadedStatuses[bufnr] = M.LoadedStatuses[bufnr] or {}
-    local records, changed = store.merge_file(store.load(store_path), key, current, ids.known, M.LoadedTexts[bufnr], M.OnDisk[bufnr], M.LoadedStatuses[bufnr])
+    local records, changed = marks_file.merge_file(marks_file.load(store_path), key, current, ids.known, M.LoadedTexts[bufnr], M.OnDisk[bufnr], M.LoadedStatuses[bufnr])
     for _, record in ipairs(records) do
         if record.file == key then M.OnDisk[bufnr][record.id] = true end
     end
@@ -332,8 +333,8 @@ function M.save_all(bufnr)
         end
     end
     if changed then
-        store.save(store_path, records)
-        M.LoadedAt[bufnr] = store.mtime(store_path)  -- our own write, not a change to reload
+        marks_file.save(store_path, records)
+        M.LoadedAt[bufnr] = marks_file.mtime(store_path)  -- our own write, not a change to reload
     end
     -- What's on disk now (theirs merged with ours) is what this buffer should show: reload it when anything
     -- of theirs was kept, so a later save starts from it instead of from old data
@@ -355,7 +356,7 @@ function M.latest_note_text(note)
         id = (M.RecordIds[note.bufnr] or {notes={}}).notes[note.extmark_id]
         store_path = select(3, locate_store(note.bufnr))
     end
-    for _, record in ipairs(store.load(store_path)) do
+    for _, record in ipairs(marks_file.load(store_path)) do
         if record.id == id then return record.text end
     end
     return nil
@@ -399,8 +400,8 @@ end
 ---
 --- @return integer|nil # row in `lines`
 function M.relocate_by_commit(info, record, lines)
-    if not (record.commit and info.top) or not store.is_ancestor(info.top, record.commit) then return nil end
-    local old = store.file_at_commit(info.top, record.commit, record.old_file or record.file)
+    if not (record.commit and info.top) or not git.is_ancestor(info.top, record.commit) then return nil end
+    local old = git.file_at_commit(info.top, record.commit, record.old_file or record.file)
     if not old then return nil end
     -- The saved row is in that version when the file was saved as committed; else where the anchor is in it
     local old_row = record.row
@@ -418,8 +419,8 @@ local function renamed_records(info, key, records)
     for _, record in ipairs(records) do
         if record.commit and record.file ~= key and not vim.startswith(record.file, '/')
             and vim.fn.filereadable(info.top .. '/' .. record.file) == 0
-            and store.is_ancestor(info.top, record.commit)
-            and store.renames_since(info.top, record.commit)[record.file] == key then
+            and git.is_ancestor(info.top, record.commit)
+            and git.renames_since(info.top, record.commit)[record.file] == key then
             record.old_file, record.file = record.file, key
             table.insert(found, record)
         end
@@ -435,16 +436,16 @@ function M.relocate_step(step, bufnr, lines)
     return M.relocate_by_commit(info, step, lines)
 end
 
---- @return string, string|nil # folder to list tours from for this buffer, and the worktree name (see store.tours_dir)
+--- @return string, string|nil # folder to list tours from for this buffer, and the worktree name (see marks_file.tours_dir)
 function M.tours_dir(bufnr)
     local path, info = locate_store(bufnr)
-    return store.tours_dir(path, info)
+    return marks_file.tours_dir(path, info)
 end
 
 --- @return string|nil # HEAD of the checkout `bufnr` is in, short; nil outside a git repo
 function M.head_commit(bufnr)
     local _, info = locate_store(bufnr)
-    return store.head_commit(info.top)
+    return git.head_commit(info.top)
 end
 
 --- The file as it was at a commit, from a buffer of the same repo. Worktrees share git's objects, so this reads a
@@ -454,15 +455,15 @@ end
 function M.file_at_commit(bufnr, commit, file)
     local _, info = locate_store(bufnr)
     if not info.top then return nil end
-    return store.file_at_commit(info.top, commit, file)
+    return git.file_at_commit(info.top, commit, file)
 end
 
 --- Restore marks+notes of a buffer from the repo's store
 function M.restore_marks(bufnr)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end
     local path, info, store_path = locate_store(bufnr)
-    local key = store.file_key(path, info)
-    local all = store.load(store_path)
+    local key = marks_file.file_key(path, info)
+    local all = marks_file.load(store_path)
     local records = vim.tbl_filter(function(r) return r.file == key end, all)
     vim.list_extend(records, renamed_records(info, key, all))
     -- Start clean, `:e!` can keep some old note extmarks
@@ -475,9 +476,9 @@ function M.restore_marks(bufnr)
     M.LoadedTexts[bufnr] = {}
     M.OnDisk[bufnr] = {}
     for _, record in ipairs(records) do M.OnDisk[bufnr][record.id] = true end
-    M.LoadedAt[bufnr] = store.mtime(store_path)
+    M.LoadedAt[bufnr] = marks_file.mtime(store_path)
     if #records == 0 then
-        local legacy = store.load_legacy(info, key)
+        local legacy = marks_file.load_legacy(info, key)
         if legacy == nil then return end
         -- Old version saved rows only: restore at those rows as they are
         for _, mark in ipairs(legacy.marks) do pcall(M.set_vimmark, bufnr, mark.char, mark.row) end
@@ -514,7 +515,7 @@ end
 function M.reload_if_changed(bufnr)
     if not M.is_real_file(bufnr) or not vim.api.nvim_buf_is_loaded(bufnr) or M.LoadedAt[bufnr] == nil then return false end
     local _, _, store_path = locate_store(bufnr)
-    local mtime = store.mtime(store_path)
+    local mtime = marks_file.mtime(store_path)
     if mtime == nil or mtime == M.LoadedAt[bufnr] then return false end
     M.save_all(bufnr)  -- merges our unsaved changes with theirs, then reloads what's on disk
     M.reload_from_store(bufnr)
@@ -527,7 +528,7 @@ function M.restore_global_marks(bufnr)
     if vim.g.nvim_marks_restore_global ~= 1 then return end
     local _, info, store_path = locate_store(bufnr)
     if not info.top then return end
-    for _, record in ipairs(store.load(store_path)) do
+    for _, record in ipairs(marks_file.load(store_path)) do
         local path, exists = M.resolve_file(record.file, bufnr)
         if record.kind == 'mark' and record.char:match('[A-Z]') and vim.fn.getpos("'" .. record.char)[2] == 0 and exists then
             vim.fn.setpos("'" .. record.char, {vim.fn.bufadd(path), record.row, 1, 0})
@@ -538,12 +539,12 @@ end
 --- @return string, string # buffer's file key (path from repo root), its repo's store file
 function M.buffer_store(bufnr)
     local path, info, store_path = locate_store(bufnr)
-    return store.file_key(path, info), store_path
+    return marks_file.file_key(path, info), store_path
 end
 
 --- Change (text and/or status) or delete (neither) a note/mark saved for a file that isn't open
 function M.edit_stored(store_path, id, text, status)
-    store.edit_record(store_path, id, text, status)
+    marks_file.edit_record(store_path, id, text, status)
 end
 
 --- Every note and mark saved for the repo of `bufnr`, for listing files that aren't open
@@ -552,7 +553,7 @@ end
 --- @return table[] # records with `path` and `exists` added: [{id, file, path, exists, kind, char, text, row, line}], by file and row
 function M.scan_repo_items(bufnr)
     local _, _, store_path = locate_store(bufnr)
-    local items = store.load(store_path)
+    local items = marks_file.load(store_path)
     for _, record in ipairs(items) do
         record.path, record.exists = M.resolve_file(record.file, bufnr)
     end
@@ -627,301 +628,6 @@ function M.refresh_sign_bar(bufnr)
     end
     -- Notes:
     -- No need, they are extmarks and will display signs already on creation
-end
-
-
---- Tests: `nvim -l tests/run.lua`
-local function read_fixture(name)
-    local dir = vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2)) .. '/../../tests/fixtures/'
-    return vim.fn.readfile(dir .. name)
-end
-
-local function eq(actual, expected, msg)
-    assert(vim.deep_equal(actual, expected), string.format('%s: expected %s, got %s', msg, vim.inspect(expected), vim.inspect(actual)))
-end
-
---- Save marks on v1, switch the file to v2 (like changing branch) and back, marks follow the lines
-function M.test_save_restore_across_versions()
-    local tmp_dir = vim.fn.tempname()
-    vim.fn.mkdir(tmp_dir, 'p')
-    store.dir_option = tmp_dir
-    local path = tmp_dir .. '/f.lua'
-    vim.fn.writefile(read_fixture('v1.lua'), path)
-    local bufnr = vim.fn.bufadd(path)
-    vim.fn.bufload(bufnr)
-    M.set_vimmark(bufnr, 'a', 8)  -- local function save(data)
-    M.set_vimmark(bufnr, 'b', 3)  -- local DEBUG = ..., deleted in v2
-    M.set_note(bufnr, 10, {'check path'})  -- print('saving', path)
-    M.save_all(bufnr)
-    local function reopen(fixture)
-        vim.api.nvim_buf_delete(bufnr, {force=true})
-        vim.fn.writefile(read_fixture(fixture), path)
-        bufnr = vim.fn.bufadd(path)
-        vim.fn.bufload(bufnr)
-        M.restore_marks(bufnr)
-    end
-    reopen('v2.lua')
-    eq(vim.api.nvim_buf_get_mark(bufnr, 'a')[1], 11, 'mark follows the line')
-    eq(vim.api.nvim_buf_get_mark(bufnr, 'b')[1], 0, 'mark on deleted line not placed')
-    eq(M.Orphans[bufnr][1].char, 'b', 'mark on deleted line kept as orphan')
-    eq(M.scan_notes(bufnr)[1][2], 13, 'note follows the edited line')
-    eq(M.scan_notes(bufnr)[1][3], {'check path'}, 'note text kept')
-    M.save_all(bufnr)
-    reopen('v1.lua')
-    eq(vim.api.nvim_buf_get_mark(bufnr, 'b')[1], 3, 'orphan comes back with its line')
-    eq(vim.api.nvim_buf_get_mark(bufnr, 'a')[1], 8, 'mark back on v1')
-    eq(M.scan_notes(bufnr)[1][2], 10, 'note back on v1, no drift')
-    vim.api.nvim_buf_delete(bufnr, {force=true})
-    store.dir_option = nil
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
---- A note whose line was rewritten, and a file renamed, are found again through the commit saved with the note
-function M.test_relocate_by_commit()
-    local tmp_dir = vim.fn.resolve(vim.fn.tempname())
-    vim.fn.mkdir(tmp_dir .. '/repo', 'p')
-    store.dir_option = tmp_dir .. '/marks'
-    local repo = tmp_dir .. '/repo'
-    local function git(...) vim.system(vim.list_extend({'git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t'}, {...})):wait() end
-    git('init', '-q')
-    vim.fn.writefile(read_fixture('v1.lua'), repo .. '/f.lua')
-    git('add', '.')
-    git('commit', '-qm', 'v1')
-    local bufnr = vim.fn.bufadd(repo .. '/f.lua')
-    vim.fn.bufload(bufnr)
-    M.set_note(bufnr, 8, {'why encode here?'})  -- local function save(data)
-    M.save_all(bufnr)
-    local saved = store.load(store.store_path(store.repo_info(repo .. '/f.lua')))[1]
-    eq(#saved.commit, store.COMMIT_LEN, 'commit saved with the note')
-    vim.api.nvim_buf_delete(bufnr, {force=true})
-    -- v3 rewrites that line to `local function write_payload(payload, opts)`, and the file is renamed
-    git('mv', 'f.lua', 'g.lua')
-    vim.fn.writefile(read_fixture('v3.lua'), repo .. '/g.lua')
-    git('add', '.')
-    git('commit', '-qm', 'v3')
-    bufnr = vim.fn.bufadd(repo .. '/g.lua')
-    vim.fn.bufload(bufnr)
-    M.restore_marks(bufnr)
-    local notes = M.scan_notes(bufnr)
-    eq(#notes, 1, 'note followed the rename')
-    eq(notes[1][2], 9, 'and the rewritten line')
-    M.save_all(bufnr)
-    local records = store.load(store.store_path(store.repo_info(repo .. '/g.lua')))
-    eq({#records, records[1].file}, {1, 'g.lua'}, 'saved under the new name, same record')
-    vim.api.nvim_buf_delete(bufnr, {force=true})
-    store.dir_option = nil
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
---- In the JSONL store a new note is one appended line, and a note that moved rewrites only its own line
-function M.test_store_lines_change_one_at_a_time()
-    local tmp_dir = vim.fn.tempname()
-    vim.fn.mkdir(tmp_dir, 'p')
-    store.dir_option = tmp_dir
-    local path = tmp_dir .. '/f.lua'
-    vim.fn.writefile(read_fixture('v1.lua'), path)
-    local store_path = tmp_dir .. '/_no_repo/' .. store.FILE_NAME
-    local bufnr = vim.fn.bufadd(path)
-    vim.fn.bufload(bufnr)
-    M.set_note(bufnr, 8, {'first'})
-    M.save_all(bufnr)
-    local before = vim.fn.readfile(store_path)
-    M.set_note(bufnr, 14, {'second'})
-    M.save_all(bufnr)
-    local after = vim.fn.readfile(store_path)
-    eq(#after, 2, 'appended')
-    eq(after[1], before[1], 'first note line untouched')
-    -- reopen on v2: `first` moves from row 8 to 11, `second` from 14 to 17
-    vim.api.nvim_buf_delete(bufnr, {force=true})
-    vim.fn.writefile(read_fixture('v2.lua'), path)
-    bufnr = vim.fn.bufadd(path)
-    vim.fn.bufload(bufnr)
-    M.restore_marks(bufnr)
-    M.save_all(bufnr)
-    local moved = vim.fn.readfile(store_path)
-    eq(#moved, 2, 'still one line per note')
-    eq(vim.json.decode(moved[1]).id, vim.json.decode(after[1]).id, 'same record kept its place')
-    eq(vim.json.decode(moved[1]).row, 11, 'row updated in place')
-    vim.api.nvim_buf_delete(bufnr, {force=true})
-    store.dir_option = nil
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
---- A file changed outside nvim (e.g. `git pull`) and reloaded: notes follow their lines, the saved anchors aren't blanked
-function M.test_outside_change_reload()
-    local tmp_dir = vim.fn.tempname()
-    vim.fn.mkdir(tmp_dir, 'p')
-    store.dir_option = tmp_dir
-    local path = tmp_dir .. '/f.lua'
-    vim.fn.writefile(read_fixture('v1.lua'), path)
-    vim.cmd('runtime plugin/nvim-marks.vim')  -- the autocmd that restores notes after a reload
-    vim.cmd('edit ' .. path)
-    local bufnr = vim.api.nvim_get_current_buf()
-    M.set_note(bufnr, 8, {'save'})  -- local function save(data)
-    M.save_all(bufnr)
-    vim.o.autoread = true
-    vim.fn.writefile(read_fixture('v2.lua'), path)  -- 3 lines inserted above it
-    vim.uv.fs_utime(path, os.time() + 5, os.time() + 5)  -- make sure nvim sees a newer file
-    vim.cmd('checktime')
-    eq(vim.api.nvim_buf_get_lines(bufnr, 10, 11, false)[1], 'local function save(data)', 'buffer reloaded from disk')
-    eq(M.scan_notes(bufnr)[1][2], 11, 'note moved with its line')
-    local saved = store.load(tmp_dir .. '/_no_repo/' .. store.FILE_NAME)[1]
-    eq(saved.line, 'local function save(data)', 'saved anchor not blanked by the reload')
-    vim.cmd('bwipeout!')
-    store.dir_option = nil
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
---- Saving twice (e.g. `save_all(0)`, then leaving the buffer) keeps one line per note in the store
-function M.test_save_twice_no_duplicates()
-    local tmp_dir = vim.fn.tempname()
-    vim.fn.mkdir(tmp_dir, 'p')
-    store.dir_option = tmp_dir
-    local path = tmp_dir .. '/f.lua'
-    vim.fn.writefile(read_fixture('v1.lua'), path)
-    vim.cmd('edit ' .. path)
-    local bufnr = vim.api.nvim_get_current_buf()
-    M.set_note(0, 8, {'once'})
-    M.save_all(0)
-    M.save_all(bufnr)
-    eq(#vim.fn.readfile(tmp_dir .. '/_no_repo/' .. store.FILE_NAME), 1, 'one record')
-    vim.cmd('bwipeout!')
-    store.dir_option = nil
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
-function M.test_toggle_note_text()
-    local bufnr = vim.api.nvim_create_buf(true, false)
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, read_fixture('v1.lua'))
-    M.set_note(bufnr, 8, {'a note'})
-    local function shown() return vim.api.nvim_buf_get_extmarks(bufnr, M.NS_Notes, 0, -1, {details=true})[1][4].virt_text ~= nil end
-    eq(shown(), true, 'shown by default')
-    M.toggle_note_text()
-    eq(shown(), false, 'hidden')
-    eq(M.scan_notes(bufnr)[1][3], {'a note'}, 'note kept with its text')
-    eq(M.scan_notes(bufnr)[1][2], 8, 'note kept on its line')
-    M.toggle_note_text()
-    eq(shown(), true, 'shown again')
-    vim.api.nvim_buf_delete(bufnr, {force=true})
-end
-
-function M.test_merge_note_edit()
-    local before = {'why?'}
-    local latest = {'(⏺) why?', '--', 'Bot reply:', 'because'}
-    eq(M.merge_note_edit(before, latest, {'why?', '-- and how?'}), {'(⏺) why?', '--', 'Bot reply:', 'because', '-- and how?'},
-       'appended line goes after the reply written meanwhile')
-    eq(M.merge_note_edit(before, latest, {'why not?'}), {'why not?'}, 'a rewrite wins')
-end
-
---- An agent edits the store while nvim has the file open: nvim's next save keeps the agent's reply, its deletion
---- and its new note, and the buffer then shows them
-function M.test_save_keeps_changes_made_elsewhere()
-    local tmp_dir = vim.fn.tempname()
-    vim.fn.mkdir(tmp_dir, 'p')
-    store.dir_option = tmp_dir
-    local path = tmp_dir .. '/f.lua'
-    local store_path = tmp_dir .. '/_no_repo/' .. store.FILE_NAME
-    vim.fn.writefile(read_fixture('v1.lua'), path)
-    vim.cmd('edit ' .. path)
-    local bufnr = vim.api.nvim_get_current_buf()
-    M.set_note(bufnr, 8, {'question A'})
-    M.set_note(bufnr, 10, {'question B'})
-    M.save_all(bufnr)
-    vim.uv.sleep(5)  -- a later mtime for the agent's write
-    -- the agent: replies to A, deletes B, adds C (like the marks skill does: rewrite the file)
-    local records = store.load(store_path)
-    local a = vim.tbl_filter(function(r) return r.text[1] == 'question A' end, records)[1]
-    a.status = 'todo'
-    a.text = {'question A', '--', 'Bot reply:', 'answer'}
-    local new = {id='agent001', file=a.file, kind='note', text={'from agent'}, row=3, line=a.line, above={}, below={}}
-    store.save(store_path, {a, new})
-    M.save_all(bufnr)
-    local texts = vim.tbl_map(function(r) return r.text[1] end, store.load(store_path))
-    eq(texts, {'question A', 'from agent'}, 'reply kept, deletion kept, new note kept')
-    eq(store.load(store_path)[1].status, 'todo', 'status set elsewhere kept')
-    local shown = vim.tbl_map(function(n) return n[3][1] end, M.scan_notes(bufnr))
-    table.sort(shown)
-    eq(shown, {'from agent', 'question A'}, 'buffer shows the latest')
-    vim.cmd('bwipeout!')
-    store.dir_option = nil
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
---- A note emptied to nothing or only spaces (in the editor, by an agent or by hand) counts as deleted
-function M.test_empty_note_is_deleted()
-    eq(M.is_empty_note({'', '   ', '\t'}), true, 'spaces only')
-    eq(M.is_empty_note('  \n '), true, 'one string')
-    eq(M.is_empty_note({'', 'x'}), false, 'has text')
-    local tmp_dir = vim.fn.tempname()
-    vim.fn.mkdir(tmp_dir, 'p')
-    store.dir_option = tmp_dir
-    local path = tmp_dir .. '/f.lua'
-    local store_path = tmp_dir .. '/_no_repo/' .. store.FILE_NAME
-    vim.fn.writefile(read_fixture('v1.lua'), path)
-    vim.cmd('edit ' .. path)
-    local bufnr = vim.api.nvim_get_current_buf()
-    M.set_note(bufnr, 8, {'keep'})
-    M.set_note(bufnr, 10, {'to empty'})
-    M.save_all(bufnr)
-    -- emptied in the file (by an agent or by hand)
-    local records = store.load(store_path)
-    for _, r in ipairs(records) do if r.text[1] == 'to empty' then r.text = {'  ', ''} end end
-    store.save(store_path, records)
-    M.restore_marks(bufnr)
-    eq(#M.scan_notes(bufnr), 1, 'empty note not shown')
-    M.save_all(bufnr)
-    eq(vim.tbl_map(function(r) return r.text[1] end, store.load(store_path)), {'keep'}, 'empty note removed from the file')
-    vim.cmd('bwipeout!')
-    store.dir_option = nil
-    vim.fn.delete(tmp_dir, 'rf')
-end
-
-function M.test_one_line()
-    eq(M.one_line({'(⏺) why?', '--', '', 'Bot reply:', '  because  '}), '(⏺) why? -- Bot reply: because', 'spaces, no blanks')
-    eq(M.one_line({'one'}), 'one', 'single line')
-end
-
-function M.test_status_prefix_on_code_line()
-    local bufnr = vim.api.nvim_create_buf(true, false)
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, read_fixture('v1.lua'))
-    local open_id = M.set_note(bufnr, 3, {'still a question'})
-    local todo_id = M.set_note(bufnr, 8, {'why?', '--', 'Bot reply:', 'because'}, nil, 'todo')
-    local function shown(id) return vim.api.nvim_buf_get_extmark_by_id(bufnr, M.NS_Notes, id, {details=true})[3].virt_text[1][1] end
-    eq(shown(open_id), M.note_prefix .. 'still a question', 'open: no symbol')
-    eq(shown(todo_id), M.note_prefix .. '(⏺) why? -- Bot reply: because', 'todo: symbol in front')
-    eq(M.NoteTexts[bufnr][todo_id][1], 'why?', 'symbol not in the saved text')
-    M.set_note_status(bufnr, open_id, 'done')
-    eq(shown(open_id), M.note_prefix .. '(ok) still a question', 'symbol follows a status change')
-    vim.api.nvim_buf_delete(bufnr, {force=true})
-end
-
---- A file shown by peek or a tour is an ordinary buffer: filetype set, listed, in the same window, not split;
---- closing it after moving on leaves only the file shown now
-function M.test_show_in_window_opens_like_edit()
-    vim.cmd('filetype on')
-    local path = vim.fn.tempname() .. '.lua'
-    vim.fn.writefile({'local x = 1'}, path)
-    local win = vim.api.nvim_get_current_win()
-    local windows_before = #vim.api.nvim_list_wins()
-    local bufnr, opened = M.show_in_window(win, path)
-    eq({vim.bo[bufnr].filetype, vim.bo[bufnr].buflisted, opened}, {'lua', true, true}, 'typed and listed, like :edit')
-    eq(vim.api.nvim_win_get_buf(win), bufnr, 'shown in the given window')
-    eq(#vim.api.nvim_list_wins(), windows_before, 'no new window')
-    local path2 = vim.fn.tempname() .. '.py'
-    vim.fn.writefile({'x = 1'}, path2)
-    local bufnr2 = M.show_in_window(win, path2)
-    eq(vim.bo[bufnr2].filetype, 'python', 'second file typed')
-    eq(vim.api.nvim_buf_is_loaded(bufnr), true, 'first file still open')
-    M.close_preview_buffer(bufnr2)
-    eq(vim.api.nvim_buf_is_loaded(bufnr2), true, 'shown in the window: not closed')
-    eq({M.show_in_window(win, path)}, {bufnr, false}, 'back to the same buffer, not opened again')
-    M.close_preview_buffer(bufnr2)
-    eq(vim.api.nvim_buf_is_loaded(bufnr2), false, 'moved on: closed')
-    eq(M.show_in_window(win, '/nonexistent/x.lua'), nil, 'missing file: nil')
-    vim.api.nvim_win_set_buf(win, vim.api.nvim_create_buf(true, false))
-    for _, b in ipairs({bufnr, bufnr2}) do
-        if vim.api.nvim_buf_is_valid(b) then vim.api.nvim_buf_delete(b, {force=true}) end
-    end
 end
 
 return M
