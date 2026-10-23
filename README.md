@@ -88,6 +88,7 @@ m
 " Press o       - Open the note under the cursor to edit it, or start the tour under it
 " Press -       - Delete the mark/note under the cursor (asks y/n)
 " Press *       - List all marks in current file
+" Press [[ / ]] - Previous / next section
 " Press q       - Quit marks window
 ```
 

@@ -230,15 +230,15 @@ function M.openMarks(opt)
     -- Path from the repo root, the same wherever nvim's cwd is (a `:cd` doesn't change what's shown or matched)
     local filename = utils.display_name(vim.api.nvim_buf_get_name(target_bufnr))
     -- Prepare content
-    local content_lines = {''}  -- a blank first line: margin under the hint bar
-    local hint = 'Help: A-Z (not G N) add mark | a add note | ' .. EditKey .. ' open note / tour | @ next status | - delete (y/n) | <Enter> jump | q quit'
+    local content_lines = {}  -- the margin under the hint bar is a virtual line, see below
+    local hint = 'Help: A-Z add mark | a add note | ' .. EditKey .. ' open | @ change status | - delete | q quit'
     local previews = {}  -- {window_row: text}, appended in gray after each item
     -- Render marks
     local marks_metadata = {}
     local vimmarks = utils.scan_vimmarks(target_bufnr)
     local global_marks = utils.scan_global_vimmarks()
     local function section(title)  -- a blank line between sections, none before the first
-        if #content_lines > 1 then table.insert(content_lines, '') end
+        if #content_lines > 0 then table.insert(content_lines, '') end
         table.insert(content_lines, title)
     end
     if #vimmarks + #global_marks > 0 then
@@ -320,13 +320,6 @@ function M.openMarks(opt)
                 table.insert(involved, {t=t, step=step_id, how=how, title=step.title or step_id})
             end
         end
-        if #involved > 0 then
-            section('# Tours involving this line (' .. #involved .. ')')
-            for _, m in ipairs(involved) do
-                table.insert(content_lines, '  ' .. m.t.name)
-                previews[#content_lines] = (m.how == 'line' and 'step: ' or 'step in this function: ') .. m.title
-                marks_metadata[#content_lines] = {type='tour', path=m.t.path, step=m.step}
-            end
         end
         section('# Tours (' .. #tours .. ')' .. (worktree and (' · ' .. worktree) or ''))
         for _, t in ipairs(tours) do
@@ -338,20 +331,37 @@ function M.openMarks(opt)
             previews[#content_lines] = t.error or t.description or ''
             marks_metadata[#content_lines] = {type='tour', path=t.path, error=t.error}
         end
+        if #involved > 0 then
+            section('# This line appears in tours: (' .. #involved .. ')')
+            for _, m in ipairs(involved) do
+                table.insert(content_lines, '  ' .. m.t.name)
+                previews[#content_lines] = (m.how == 'line' and 'step: ' or 'step in this function: ') .. m.title
+                marks_metadata[#content_lines] = {type='tour', path=m.t.path, step=m.step}
+            end
     end
     local tours_rendered = false
     for _, status in ipairs(SectionOrder) do
         if status == 'anchor' then render_tours(); tours_rendered = true end
         local group = vim.tbl_filter(function(note) return note.status == status end, notes)
-        if #group > 0 then
-            section('# ' .. StatusTitles[status] .. ' (' .. #group .. ')')
-            for _, note in ipairs(group) do
-                i = i + 1
-                local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
-                table.insert(content_lines, number .. ' ' .. fit(labeled(note), note_width))
-                previews[#content_lines] = note_tail(note.filename .. ':' .. note.row, path_width, note.line)
-                marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = 'note' })
-                if status == 'done' then dimmed[#content_lines] = true end
+        -- Done notes in two sections, this file's first: there are usually many, mostly about other files
+        local groups = {{title=StatusTitles[status], notes=group}}
+        if status == 'done' then
+            local this_file = utils.buffer_store(target_bufnr)
+            local here = vim.tbl_filter(function(note) return note.filename == this_file end, group)
+            local other = vim.tbl_filter(function(note) return note.filename ~= this_file end, group)
+            groups = {{title='Marked in This File', notes=here}, {title='Marked in Other Files', notes=other}}
+        end
+        for _, g in ipairs(groups) do
+            if #g.notes > 0 then
+                section('# ' .. g.title .. ' (' .. #g.notes .. ')')
+                for _, note in ipairs(g.notes) do
+                    i = i + 1
+                    local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
+                    table.insert(content_lines, number .. ' ' .. fit(labeled(note), note_width))
+                    previews[#content_lines] = note_tail(note.filename .. ':' .. note.row, path_width, note.line)
+                    marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = 'note' })
+                    if status == 'done' then dimmed[#content_lines] = true end
+                end
             end
         end
     end
@@ -379,10 +389,18 @@ function M.openMarks(opt)
         end
     end
     -- Create a window and display
-    if #content_lines == 1 then table.insert(content_lines, '(no marks or notes yet)') end
-    local win_bufnr = M.create_window(#content_lines + 1)  -- + the top bar
+    if #content_lines == 0 then table.insert(content_lines, '(no marks or notes yet)') end
+    local win_bufnr = M.create_window(#content_lines + 2)  -- + the top bar and the margin under it
     MarksMetadata[win_bufnr] = marks_metadata
     vim.api.nvim_buf_set_lines(win_bufnr, 0, -1, false, content_lines)
+    -- Margin under the hint bar: a virtual blank line above line 1, not a row of the list (nvim only draws it when
+    -- the view is at the top and asks for it, see margin_in_view)
+    vim.api.nvim_buf_set_extmark(win_bufnr, NS_Preview, 0, 0, {virt_lines={{{'', 'Normal'}}}, virt_lines_above=true})
+    local function margin_in_view()
+        if vim.api.nvim_get_current_buf() ~= win_bufnr then return end
+        local view = vim.fn.winsaveview()
+        if view.topline == 1 and view.topfill == 0 then vim.fn.winrestview({topline=1, topfill=1}) end
+    end
     -- Put the cursor on the note asked for (after @), else on the mark/note of the line we came from, if any
     local function record_id(n)  -- the store id of a note, whether it's open in a buffer or not
         if n.extmark_id then return (utils.RecordIds[n.bufnr] or {notes={}}).notes[n.extmark_id] end
@@ -433,6 +451,8 @@ function M.openMarks(opt)
     local cursor_row = vim.api.nvim_win_get_cursor(0)[1]
     local top = math.max(1, cursor_row - vim.api.nvim_win_get_height(0) + 1)
     vim.fn.winrestview({topline=top, lnum=cursor_row, col=0})
+    margin_in_view()
+    vim.api.nvim_create_autocmd({'CursorMoved', 'WinScrolled'}, {buffer=win_bufnr, callback=margin_in_view})
     -- Show the item under the cursor in the code window as the cursor moves; closing the menu puts it back
     local origin_win = MenuOrigin.win
     Peek = {win=origin_win, bufnr=target_bufnr, view=vim.api.nvim_win_call(origin_win, vim.fn.winsaveview)}
@@ -469,13 +489,31 @@ function M.openMarks(opt)
             vim.api.nvim_echo({{'Added mark: '..char, 'Normal'}}, false, {})
         end, opts)
     end
-    -- Key: Add a note, or edit the one already on this line
-    vim.keymap.set('n', 'a', function()
+    -- Keys: [[ / ]] to the previous / next section's first item
+    -- from anywhere in a section, wrapping around at the first and last section
+    local function to_section(dir)
+        local titles = {}
+        for row, line in ipairs(vim.api.nvim_buf_get_lines(win_bufnr, 0, -1, false)) do
+            if line:match('^# ') then table.insert(titles, row) end
+        end
+        if #titles == 0 then return end
+        local cur, here = vim.api.nvim_win_get_cursor(0)[1], 0  -- here: index of the section the cursor is in
+        for k, row in ipairs(titles) do if row <= cur then here = k end end
+        local k = (here + dir - 1) % #titles + 1
+        if here == 0 then k = dir > 0 and 1 or #titles end  -- above the first title
+        vim.api.nvim_win_set_cursor(0, {math.min(titles[k] + 1, vim.api.nvim_buf_line_count(win_bufnr)), 0})
+    end
+    vim.keymap.set('n', ']]', function() to_section(1) end, opts)
+    vim.keymap.set('n', '[[', function() to_section(-1) end, opts)
+    -- Key: Add a note, or edit the one already on this line (`a`, or `+` as before; only `a` is in the help line)
+    local function add_note()
         for _, note in ipairs(notes) do
             if note.bufnr == target_bufnr and note.row == target_row then return M.edit_note(note) end
         end
         M.switchEditMode(target_bufnr, target_row)
-    end, opts)
+    end
+    vim.keymap.set('n', 'a', add_note, opts)
+    vim.keymap.set('n', '+', add_note, opts)
     -- Key: next status for the note under the cursor. The list redraws with the note in its new section and the
     -- cursor still on it, so pressing @ again keeps cycling the same note
     vim.keymap.set('n', '@', function()
