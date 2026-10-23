@@ -21,6 +21,7 @@ local PathWidthMax = 50  -- the path column is as wide as the longest path, up t
 local MenuOrigin = nil  -- {win, bufnr, row} the marks list was last opened from, for `[` in the editor to go back to
 local StatusTitles = {open='Notes', todo='TODO', done='DONE', anchor='Anchors'}
 local SectionOrder = {'open', 'todo', 'anchor', 'done'}  -- list sections top to bottom (same as the `@` cycle)
+local NS_Tables = vim.api.nvim_create_namespace('nvim-marks.tables')  -- markdown table padding, see align_markdown_tables
 local MarksMetadata = {}  -- {win_bufnr: {row: metadata}}, kept in Lua since vim.b turns sparse tables into lists
 local Peek = nil  -- {win, bufnr, view, opened, keep}: the code window showing the menu item under the cursor, see peek()
 
@@ -115,6 +116,7 @@ end
 --- @param note table|nil # the menu item being edited, so going back to the menu puts the cursor on it
 function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete, status_ops, note)
     local edit_bufnr = M.create_window()
+    M.use_markdown(edit_bufnr)
     if initial then vim.api.nvim_buf_set_lines(edit_bufnr, 0, -1, false, initial) end
     -- Hint in the window's top bar: always visible however the text scrolls, and not part of the note
     -- (a virtual line above line 1 hides as soon as the view scrolls past it)
@@ -611,9 +613,11 @@ end
 function M.read_orphan(item)
     local origin = MenuOrigin
     local bufnr = M.create_window()
+    M.use_markdown(bufnr)
     local symbol = require('nvim-marks.marks_file').STATUS_SYMBOLS[item.status or 'open']
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, item.text)
     vim.bo[bufnr].modifiable = false
+    utils.align_tables(bufnr, NS_Tables)  -- the text is set after the FileType autocmd ran
     local hint = 'Orphaned note: its line is gone (' .. item.filename .. ':' .. item.row .. ') | read only | q quit | <Backspace> return to main menu'
     vim.wo.winbar = '%#Comment#' .. ((symbol ~= '' and symbol .. ' ' or '') .. hint):gsub('%%', '%%%%')
     vim.api.nvim_buf_set_extmark(bufnr, NS_Preview, 0, 0, {virt_lines_above=true, virt_lines={
@@ -698,6 +702,12 @@ function M.window_height(content_lines)
     if max < 1 then max = math.floor(vim.o.lines * max) end
     local min = math.min(10, max)
     return math.max(min, math.min(max, content_lines or max))
+end
+
+--- A note panel as a markdown buffer, so the user's own markdown setup (FileType autocmds: colors, conceal, spell)
+--- applies the same as in any .md file. The panel's own keys are set again afterwards, in case it mapped any.
+function M.use_markdown(bufnr)
+    vim.bo[bufnr].filetype = 'markdown'
 end
 
 --- @param content_lines integer|nil # lines it will show, to size the window to them
@@ -817,12 +827,31 @@ function M.toggleNoteText(hide)
     vim.api.nvim_echo({{'nvim-marks: note text ' .. (shown and 'shown' or 'hidden'), 'Normal'}}, false, {})
 end
 
+--- Line up markdown tables on screen in every markdown buffer (files and the plugin's note panels), the text left as
+--- typed: when one is shown and after each change. Off with setup({markdown_tables=false}) or
+--- g:nvim_marks_markdown_tables = 0.
+local function align_markdown_tables()
+    local group = vim.api.nvim_create_augroup('nvim-marks-tables', {clear=true})
+    if vim.g.nvim_marks_markdown_tables == 0 then return end
+    vim.api.nvim_create_autocmd('FileType', {group=group, pattern='markdown', callback=function(ev)
+        local bufnr = ev.buf
+        local function align()
+            if vim.api.nvim_buf_is_valid(bufnr) then utils.align_tables(bufnr, NS_Tables) end
+        end
+        -- after the window is set up (conceallevel decides the widths), and again on each change
+        vim.schedule(align)
+        vim.api.nvim_create_autocmd({'TextChanged', 'TextChangedI', 'BufWinEnter'}, {group=group, buffer=bufnr, callback=align})
+    end})
+end
+align_markdown_tables()
+
 --- @param opt table|nil # {dir=string} folder where marks are saved (see marks_file.lua)
 ---                         {reload_interval=10} seconds between checks for changes from elsewhere, 0 turns it off
 ---                         {height=0.4} panel max height: a share of the screen (< 1) or a number of lines; it fits its content up to that
 ---                         {note_style='inline'|'above'} notes at the end of the line (default) or on lines above it
 ---                         {note_prefix=string} before an inline note, default '    -- '
 ---                         {show_note_text=false} start with notes' text hidden, only the `*` sign shows
+---                         {markdown_tables=false} don't line up markdown tables (on by default, every markdown buffer)
 function M.setup(opt)
     opt = opt or {}
     if opt.note_style then utils.note_style = opt.note_style end
@@ -831,6 +860,15 @@ function M.setup(opt)
     if opt.dir then require('nvim-marks.marks_file').dir_option = opt.dir end
     if opt.reload_interval then M.start_auto_reload(opt.reload_interval * 1000) end
     if opt.height then vim.g.nvim_marks_height = opt.height end
+    if opt.markdown_tables ~= nil then
+        vim.g.nvim_marks_markdown_tables = opt.markdown_tables and 1 or 0
+        align_markdown_tables()
+        if not opt.markdown_tables then
+            for _, b in ipairs(vim.api.nvim_list_bufs()) do
+                if vim.api.nvim_buf_is_valid(b) then vim.api.nvim_buf_clear_namespace(b, NS_Tables, 0, -1) end
+            end
+        end
+    end
 end
 
 M.start_auto_reload((vim.g.nvim_marks_reload_interval or 10) * 1000)

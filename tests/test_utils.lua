@@ -330,4 +330,43 @@ function T.test_show_in_window_opens_like_edit()
     end
 end
 
+--- Table columns line up on screen through inline padding; the text itself isn't changed
+function T.test_align_tables()
+    local lines = vim.fn.readfile(vim.fs.dirname(debug.getinfo(1, 'S').source:sub(2)) .. '/fixtures/table-note.md')
+    local bufnr = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    local ns = vim.api.nvim_create_namespace('test-tables')
+    local win = vim.api.nvim_open_win(bufnr, false, {relative='editor', row=0, col=0, width=80, height=8})
+    vim.wo[win].conceallevel = 2  -- backticks hidden, as in a markdown buffer
+    M.align_tables(bufnr, ns)
+    local function shown(row)  -- the line as drawn: text with the padding inserted
+        local text = lines[row]
+        local marks = vim.api.nvim_buf_get_extmarks(bufnr, ns, {row - 1, 0}, {row - 1, -1}, {details=true})
+        table.sort(marks, function(a, b) return a[3] > b[3] end)
+        for _, m in ipairs(marks) do
+            if m[4].virt_text then text = text:sub(1, m[3]) .. m[4].virt_text[1][1] .. text:sub(m[3] + 1) end
+        end
+        return text
+    end
+    local bars = {}
+    for row = 2, 5 do
+        local cols = {}
+        local line = shown(row)
+        for col in line:gmatch('()|') do
+            local before = line:sub(1, col)
+            local _, ticks = before:gsub('`', '')
+            -- not a `|` inside `code`; measured as shown, with the backticks hidden
+            if ticks % 2 == 0 then table.insert(cols, vim.fn.strdisplaywidth(before) - ticks) end
+        end
+        bars[row] = cols
+    end
+    eq(bars[3], bars[2], 'rule row lines up with the header')
+    eq(bars[4], bars[2], 'a body row lines up')
+    eq(bars[5], bars[2], 'a row with a `|` inside code lines up')
+    eq(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), lines, 'text unchanged')
+    eq(#vim.api.nvim_buf_get_extmarks(bufnr, ns, {0, 0}, {0, -1}, {}), 0, 'a line that is not a table: no padding')
+    vim.api.nvim_win_close(win, true)
+    vim.api.nvim_buf_delete(bufnr, {force=true})
+end
+
 return T

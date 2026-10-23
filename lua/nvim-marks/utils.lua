@@ -614,6 +614,81 @@ function M.close_preview_buffer(bufnr)
     vim.api.nvim_buf_delete(bufnr, {})
 end
 
+--- @return integer # display width of text as the window shows it: `code` backticks take no room when they're
+---                   concealed (the user's markdown setup hides them with conceallevel >= 2)
+local function shown_width(text, concealed)
+    local width = vim.fn.strdisplaywidth(text)
+    if not concealed then return width end
+    local _, spans = text:gsub('`[^`]+`', '')
+    return width - 2 * spans
+end
+
+--- Line up the columns of markdown tables on screen: each cell is padded, as inline virtual text, to the widest cell
+--- of its column (as shown: without `code` backticks when the window conceals them), so the text itself (what's
+--- saved) stays as typed. A table is a run of lines starting with `|`; its `|---|---|` row is padded with dashes.
+--- Redraw after every change (it clears the namespace first).
+---
+--- @param ns integer # namespace for the padding
+function M.align_tables(bufnr, ns)
+    vim.api.nvim_buf_clear_namespace(bufnr, ns, 0, -1)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    local win = vim.fn.bufwinid(bufnr)
+    local concealed = win ~= -1 and vim.wo[win].conceallevel >= 2
+    local function cells(line)  -- {start byte, end byte (the cell's text, without the bars)} for each cell
+        local out, pos = {}, line:find('|', 1, true) + 1
+        while pos <= #line do
+            local bar = line:find('|', pos, true)
+            -- a `|` inside `code` doesn't end the cell
+            while bar do
+                local _, ticks = line:sub(1, bar):gsub('`', '')
+                if ticks % 2 == 0 then break end
+                bar = line:find('|', bar + 1, true)
+            end
+            table.insert(out, {pos, (bar or #line + 1) - 1})
+            if not bar then break end
+            pos = bar + 1
+        end
+        if out[#out] and vim.trim(line:sub(out[#out][1], out[#out][2])) == '' and line:match('|%s*$') then
+            table.remove(out)  -- the empty space after the closing bar
+        end
+        return out
+    end
+    local row = 1
+    while row <= #lines do
+        if not lines[row]:match('^%s*|') then
+            row = row + 1
+        else
+            local first = row
+            while row <= #lines and lines[row]:match('^%s*|') do row = row + 1 end
+            local rows, widths = {}, {}
+            for r = first, row - 1 do
+                local c = cells(lines[r])
+                local is_rule = lines[r]:match('^%s*|[%s|:%-]+$') ~= nil
+                rows[r] = {cells=c, rule=is_rule}
+                if not is_rule then
+                    for k, cell in ipairs(c) do
+                        local w = shown_width(vim.trim(lines[r]:sub(cell[1], cell[2])), concealed)
+                        widths[k] = math.max(widths[k] or 0, w)
+                    end
+                end
+            end
+            for r = first, row - 1 do
+                for k, cell in ipairs(rows[r].cells) do
+                    local text = lines[r]:sub(cell[1], cell[2])
+                    local target = (widths[k] or 0) + 2  -- one space each side, like `| text |`
+                    local pad = target - shown_width(text, concealed)
+                    if pad > 0 then
+                        local fill = rows[r].rule and string.rep('-', pad) or string.rep(' ', pad)
+                        vim.api.nvim_buf_set_extmark(bufnr, ns, r - 1, cell[2], {
+                            virt_text={{fill, rows[r].rule and 'Comment' or 'Normal'}}, virt_text_pos='inline',
+                        })
+                    end
+                end
+            end
+        end
+    end
+end
+
 --- @return string # the buffer's line at row, trimmed, for previews
 function M.line_preview(bufnr, row)
     if not vim.api.nvim_buf_is_loaded(bufnr) then return '' end

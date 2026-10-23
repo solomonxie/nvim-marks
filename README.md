@@ -141,6 +141,12 @@ The root step can also carry `info`, anything that helps find the code again, li
 
 `file` is the path from the repo root, or an absolute path for a file in another repo (the panel then shows its full path, `~` for home, instead of just the file name, so you can tell it's outside the repo); `row` and `line` (the exact code) find the step's line again after edits, like a note. Add `"commit"` (HEAD when the tour was written, e.g. `git rev-parse --short=12 HEAD`) and a step whose line was later rewritten is still found, through the diff since that commit. `text` is the explanation (markdown, `\n` for new lines). The plugin only reads tours: write them by hand, or have an LLM write one. Tours with a separate header line (`{"tour":..., "root":"s1"}` before the steps) still load.
 
+## 📐 Markdown tables
+
+Markdown tables line up on screen in every markdown buffer, files and the note panels alike: each cell is padded to its column's widest cell (as shown, so `code` whose backticks your markdown setup hides doesn't throw it off), redrawn as you type. Only the display changes; the file or note keeps the text as typed. Turn it off with `setup({ markdown_tables = false })` or `let g:nvim_marks_markdown_tables = 0`.
+
+The note editor is a normal markdown buffer, so your own markdown setup (colors, conceal, spell) applies there too.
+
 ## ⚙️ Configuration
 
 Works out of the box. Marks are saved to `<dir>/<repo>/marks.jsonl`, one file per repo shared by all its worktrees. `<dir>` defaults to `stdpath('data')/nvim-marks` (e.g. `~/.local/share/nvim/nvim-marks/myapp/marks.jsonl`).
