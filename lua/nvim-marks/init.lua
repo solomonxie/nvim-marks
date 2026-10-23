@@ -151,7 +151,7 @@ function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete,
     vim.api.nvim_create_autocmd({'CursorMoved', 'CursorMovedI', 'WinScrolled', 'TextChanged', 'TextChangedI'}, {buffer=edit_bufnr, callback=show_margin})
     on_save = on_save or function(text) utils.set_note(target_bufnr, target_row, text) end
     -- Key: save, then back to the marks list, opened for the file and line the editor was opened from
-    -- (Backspace, or `[`, which the help line doesn't list)
+    -- (Backspace, or `[[`, which the help line doesn't list)
     local function back_to_menu()
         local origin = MenuOrigin
         M.save_note(edit_bufnr, target_bufnr, on_save, false, on_delete)
@@ -163,7 +163,7 @@ function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete,
         end
     end
     vim.keymap.set('n', '<BS>', back_to_menu, {buffer=edit_bufnr, silent=true, nowait=true})
-    vim.keymap.set('n', '[', back_to_menu, {buffer=edit_bufnr, silent=true, nowait=true})
+    vim.keymap.set('n', '[[', back_to_menu, {buffer=edit_bufnr, silent=true})
     -- Key: delete the note being edited, after a y/n
     if on_delete then
         vim.keymap.set('n', '-', function()
@@ -366,10 +366,11 @@ function M.openMarks(opt)
         end
     end
     if not tours_rendered then render_tours() end
-    -- Render orphans: saved marks/notes whose line isn't in this version of the file (e.g. another branch)
+    -- Render orphans: saved marks/notes whose line isn't in this version of the file (deleted, or another branch);
+    -- kept until deleted, and `o` / <Enter> opens a note to read
     local orphans = utils.Orphans[target_bufnr] or {}
     if #orphans ~= 0 then
-        section('# Not found in this version (kept until deleted)')
+        section('# Orphaned notes (' .. #orphans .. ')')
     end
     local function orphan_label(item) return item.char and ('(' .. item.char .. ')') or ('* ' .. note_summary(item.text)) end
     local orphan_width = column_width(vim.tbl_map(orphan_label, orphans), NoteWidth + 2)
@@ -377,7 +378,8 @@ function M.openMarks(opt)
     for i, item in ipairs(orphans) do
         table.insert(content_lines, fit(orphan_label(item), orphan_width))
         previews[#content_lines] = note_tail(filename .. ':' .. item.row, orphan_path_width, vim.trim(item.line))
-        marks_metadata[#content_lines] = { type = 'orphan', index = i, char = item.char, row = item.row, filename = filename }
+        marks_metadata[#content_lines] = { type = 'orphan', index = i, char = item.char, row = item.row, filename = filename,
+                                           text = item.text, line = item.line, status = item.status }
     end
     -- Append each item's path/line text, remembering where the gray part starts
     local gray_from = {}
@@ -543,6 +545,8 @@ function M.openMarks(opt)
             M.edit_note(mark)
         elseif mark and mark.type == 'tour' then
             start_tour(mark)
+        elseif mark and mark.type == 'orphan' and mark.text then
+            M.read_orphan(mark)
         else
             vim.api.nvim_echo({{'Not on a note or tour', 'WarningMsg'}}, false, {})
         end
@@ -551,7 +555,9 @@ function M.openMarks(opt)
     vim.keymap.set('n', '<CR>', function()
         local mark = M.get_mark_at_cursor()
         if mark and mark.type == 'tour' then return start_tour(mark) end
-        if mark and mark.type == 'orphan' then
+        if mark and mark.type == 'orphan' and mark.text then
+            M.read_orphan(mark)
+        elseif mark and mark.type == 'orphan' then
             vim.api.nvim_echo({{'Not found in this version of the file', 'WarningMsg'}}, false, {})
         elseif mark then
             if Peek then Peek.keep = true end  -- the code window already shows it, keep it there
@@ -598,6 +604,31 @@ function M.openMarks(opt)
         end
     end, opts)
     vim.cmd('redraw')
+end
+
+--- Show an orphaned note (its line isn't in the file any more) to read: its text, and the line it was on. Read only;
+--- q quits, <Backspace> or `[[` goes back to the menu. Its status can't be changed here (yet).
+function M.read_orphan(item)
+    local origin = MenuOrigin
+    local bufnr = M.create_window()
+    local symbol = require('nvim-marks.marks_file').STATUS_SYMBOLS[item.status or 'open']
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, item.text)
+    vim.bo[bufnr].modifiable = false
+    local hint = 'Orphaned note: its line is gone (' .. item.filename .. ':' .. item.row .. ') | read only | q quit | <Backspace> return to main menu'
+    vim.wo.winbar = '%#Comment#' .. ((symbol ~= '' and symbol .. ' ' or '') .. hint):gsub('%%', '%%%%')
+    vim.api.nvim_buf_set_extmark(bufnr, NS_Preview, 0, 0, {virt_lines_above=true, virt_lines={
+        {{'was on: ' .. vim.trim(item.line or ''), 'Comment'}}, {{'', 'Normal'}},
+    }})
+    vim.fn.winrestview({topline=1, topfill=2})
+    local function back()
+        vim.cmd('bwipeout!')
+        if origin and vim.api.nvim_win_is_valid(origin.win) then
+            vim.api.nvim_set_current_win(origin.win)
+            M.openMarks()
+        end
+    end
+    vim.keymap.set('n', '<BS>', back, {buffer=bufnr, silent=true, nowait=true})
+    vim.keymap.set('n', '[[', back, {buffer=bufnr, silent=true})
 end
 
 --- Move a note to its next status and save it right away (open buffer: via its extmark; closed file: in the store)

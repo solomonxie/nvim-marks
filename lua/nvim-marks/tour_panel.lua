@@ -414,7 +414,7 @@ function M.start(path, origin_bufnr, create_window, step_id)
     vim.keymap.set('n', 'p', function() move(-1) end, opts)
     vim.keymap.set('n', '<CR>', jump, opts)
     vim.keymap.set('n', '<BS>', back_to_menu, opts)
-    vim.keymap.set('n', '[', back_to_menu, opts)  -- same as Backspace, not in the help line
+    vim.keymap.set('n', '[[', back_to_menu, {buffer=panel_buf, silent=true})  -- same as Backspace, not in the help line
     vim.keymap.set('n', 'q', M.quit, opts)
     vim.keymap.set('n', '<C-c>', M.quit, opts)
     vim.keymap.set('n', '<Esc>', M.quit, opts)
