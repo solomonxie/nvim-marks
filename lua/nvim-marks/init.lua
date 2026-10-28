@@ -142,10 +142,17 @@ function M.switchEditMode(target_bufnr, target_row, initial, on_save, on_delete,
     end
     -- Margin under the bar: a virtual blank line above line 1, not part of the note. nvim only draws a line
     -- above the first one when the view says so (topfill), so ask for it now and whenever it scrolls back to the top
+    -- Footer under the last line: a blank row, then when the note was first saved (none for a new note)
+    local footer = M.created_footer(note and note.created)
     local function show_margin()
         -- Editing line 1 (`O`, `dd`) can move or drop the extmark, so put it back on line 1 each time
         vim.api.nvim_buf_clear_namespace(edit_bufnr, NS_Preview, 0, -1)
         vim.api.nvim_buf_set_extmark(edit_bufnr, NS_Preview, 0, 0, {virt_lines={{{'', 'Normal'}}}, virt_lines_above=true})
+        -- and the footer back on the last line, which typing moves
+        if footer then
+            local last = vim.api.nvim_buf_line_count(edit_bufnr) - 1
+            vim.api.nvim_buf_set_extmark(edit_bufnr, NS_Preview, last, 0, {virt_lines=footer})
+        end
         if vim.api.nvim_get_current_buf() ~= edit_bufnr then return end
         local view = vim.fn.winsaveview()
         if view.topline == 1 and view.topfill == 0 then vim.fn.winrestview({topline=1, topfill=1}) end
@@ -384,7 +391,7 @@ function M.openMarks(opt)
         table.insert(content_lines, fit(orphan_label(item), orphan_width))
         previews[#content_lines] = note_tail(filename .. ':' .. item.row, orphan_path_width, vim.trim(item.line))
         marks_metadata[#content_lines] = { type = 'orphan', index = i, char = item.char, row = item.row, filename = filename,
-                                           text = item.text, line = item.line, status = item.status }
+                                           text = item.text, line = item.line, status = item.status, created = item.created }
     end
     -- Append each item's path/line text, remembering where the gray part starts
     local gray_from = {}
@@ -626,6 +633,8 @@ function M.read_orphan(item)
     vim.api.nvim_buf_set_extmark(bufnr, NS_Preview, 0, 0, {virt_lines_above=true, virt_lines={
         {{'was on: ' .. vim.trim(item.line or ''), 'Comment'}}, {{'', 'Normal'}},
     }})
+    local footer = M.created_footer(item.created)
+    if footer then vim.api.nvim_buf_set_extmark(bufnr, NS_Preview, #item.text - 1, 0, {virt_lines=footer}) end
     vim.fn.winrestview({topline=1, topfill=2})
     local function back()
         vim.cmd('bwipeout!')
@@ -636,6 +645,14 @@ function M.read_orphan(item)
     end
     vim.keymap.set('n', '<BS>', back, {buffer=bufnr, silent=true, nowait=true})
     vim.keymap.set('n', '[[', back, {buffer=bufnr, silent=true})
+end
+
+--- @param created string|nil # a record's `created` time, UTC
+--- @return table|nil # virtual lines for a note panel's footer: a blank row, then the time it was created
+function M.created_footer(created)
+    local time = utils.local_time(created)
+    if not time then return nil end
+    return {{{'', 'Normal'}}, {{'created: ' .. time, 'Comment'}}}
 end
 
 --- Move a note to its next status and save it right away (open buffer: via its extmark; closed file: in the store)
@@ -711,6 +728,9 @@ end
 --- applies the same as in any .md file. The panel's own keys are set again afterwards, in case it mapped any.
 function M.use_markdown(bufnr)
     vim.bo[bufnr].filetype = 'markdown'
+    -- Long lines wrap at word boundaries in the editor and the reader (the menu and the tour panel stay nowrap)
+    vim.wo.wrap = true
+    vim.wo.linebreak = true
 end
 
 --- @param content_lines integer|nil # lines it will show, to size the window to them

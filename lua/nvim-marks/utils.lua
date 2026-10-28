@@ -144,6 +144,17 @@ function M.one_line(text)
     return table.concat(parts, ' ')
 end
 
+--- @param created string|nil # a record's `created` time, UTC (see marks_file.now)
+--- @return string|nil # it in local time with the zone, `2026-10-27 03:00 PDT`; nil for notes saved before it was kept
+function M.local_time(created)
+    local y, mo, d, h, mi, s = (created or ''):match('^(%d+)-(%d+)-(%d+)T(%d+):(%d+):(%d+)')
+    if not y then return nil end
+    -- os.time reads the fields as local time: add the local offset back to get the UTC time's epoch
+    local t = os.time({year=y, month=mo, day=d, hour=h, min=mi, sec=s, isdst=false})
+    local epoch = t + (os.time(os.date('*t', t)) - os.time(os.date('!*t', t)))
+    return os.date('%Y-%m-%d %H:%M %Z', epoch)
+end
+
 --- @param text string[]|string|nil # a note's lines (or one string)
 --- @return boolean # true when there's nothing in it but spaces: such a note counts as deleted
 function M.is_empty_note(text)

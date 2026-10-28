@@ -395,4 +395,13 @@ function T.test_note_created_kept()
     vim.fn.delete(tmp_dir, 'rf')
 end
 
+--- A record's UTC `created` shown in local time; notes saved before it was kept have none
+function T.test_local_time()
+    local epoch = os.time({year=2026, month=10, day=27, hour=10, min=0, sec=0, isdst=false})
+    epoch = epoch + (os.time(os.date('*t', epoch)) - os.time(os.date('!*t', epoch)))
+    eq(os.date('!%Y-%m-%dT%H:%M:%SZ', epoch), '2026-10-27T10:00:00Z', 'test epoch is the UTC time')
+    eq(M.local_time('2026-10-27T10:00:00Z'), os.date('%Y-%m-%d %H:%M %Z', epoch), 'local time, with the zone')
+    eq(M.local_time(nil), nil, 'no time')
+end
+
 return T
