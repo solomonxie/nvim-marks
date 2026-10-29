@@ -211,7 +211,8 @@ function M.edit_note(note)
         if note.extmark_id then
             local record_id = utils.RecordIds[note.bufnr].notes[note.extmark_id]
             vim.api.nvim_buf_del_extmark(note.bufnr, utils.NS_Notes, note.extmark_id)
-            utils.set_note(note.bufnr, note.row, text, record_id, note.status)  -- same record, so it keeps its line in the store
+            -- same record and created time, so it keeps its line in the store and its place in the menu
+            utils.set_note(note.bufnr, note.row, text, record_id, note.status, note.created)
         else
             utils.edit_stored(note.store_path, note.id, text)
         end
@@ -274,7 +275,8 @@ function M.openMarks(opt)
     local live_keys = {}
     local function add_live(bufnr)
         local key, buf_store_path = utils.buffer_store(bufnr)
-        if buf_store_path ~= store_path then return end
+        -- once per file: the same file open from two worktrees shares its records, the first buffer lists them
+        if buf_store_path ~= store_path or live_keys[key] then return end
         live_keys[key] = true
         local name = key  -- path from the repo root, the same as for closed files, so the order doesn't depend on cwd
         for _, item in ipairs(utils.scan_notes(bufnr)) do
@@ -282,11 +284,23 @@ function M.openMarks(opt)
             table.insert(notes, {bufnr=bufnr, extmark_id=id, row=row, text=note_lines, status=status or 'open',
                                  filename=name, line=utils.line_preview(bufnr, row), created=created})
         end
+        -- Orphaned notes (line not found in the file) with the other notes of their status, at their saved row, so
+        -- every section lists the same notes from any buffer. Read and deleted like orphans (see read_orphan).
+        for i, item in ipairs(utils.Orphans[bufnr] or {}) do
+            if item.kind == 'note' then
+                table.insert(notes, {orphan=true, bufnr=bufnr, index=i, id=item.id, row=item.row, text=item.text, status=item.status or 'open',
+                                     filename=name, line=vim.trim(item.line or ''), created=item.created})
+            end
+        end
     end
+    -- This file first, then the open buffers with fewest orphans first, so a file open in two worktrees is listed
+    -- from the one whose lines its notes are on
     add_live(target_bufnr)
-    for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-        if bufnr ~= target_bufnr and IsBufferSetup[bufnr] and vim.api.nvim_buf_is_loaded(bufnr) then add_live(bufnr) end
-    end
+    local others = vim.tbl_filter(function(bufnr)
+        return bufnr ~= target_bufnr and IsBufferSetup[bufnr] and vim.api.nvim_buf_is_loaded(bufnr)
+    end, vim.api.nvim_list_bufs())
+    table.sort(others, function(a, b) return #(utils.Orphans[a] or {}) < #(utils.Orphans[b] or {}) end)
+    for _, bufnr in ipairs(others) do add_live(bufnr) end
     for _, item in ipairs(utils.scan_repo_items(target_bufnr)) do
         if item.kind == 'note' and not live_keys[item.file] and not utils.is_empty_note(item.text) then
             table.insert(notes, {id=item.id, path=item.path, exists=item.exists, store_path=store_path, status=item.status or 'open',
@@ -294,10 +308,11 @@ function M.openMarks(opt)
                                  created=item.created})
         end
     end
-    -- Most recent first in every section (`created`, UTC text that sorts by time); notes from before it was saved
-    -- have none and come last, by path then row, so the order never depends on where the menu was opened
+    -- Oldest first and the most recent last in every section (`created`, UTC text that sorts by time); notes from
+    -- before it was saved have none and come first, by path then row, so the order never depends on where the menu
+    -- was opened
     table.sort(notes, function(a, b)
-        if (a.created or '') ~= (b.created or '') then return (a.created or '') > (b.created or '') end
+        if (a.created or '') ~= (b.created or '') then return (a.created or '') < (b.created or '') end
         if a.filename ~= b.filename then return a.filename < b.filename end
         return a.row < b.row
     end)
@@ -371,7 +386,7 @@ function M.openMarks(opt)
                     local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
                     table.insert(content_lines, number .. ' ' .. fit(labeled(note), note_width))
                     previews[#content_lines] = note_tail(note.filename .. ':' .. note.row, path_width, note.line)
-                    marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = 'note' })
+                    marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = note.orphan and 'orphan' or 'note' })
                     if status == 'done' then dimmed[#content_lines] = true end
                 end
             end
@@ -380,18 +395,25 @@ function M.openMarks(opt)
     if not tours_rendered then render_tours() end
     -- Render orphans: saved marks/notes whose line isn't in this version of the file (deleted, or another branch);
     -- kept until deleted, and `o` / <Enter> opens a note to read
-    local orphans = utils.Orphans[target_bufnr] or {}
+    -- of this file: marks only, orphaned notes are listed under their status (above)
+    local orphans = {}
+    for i, item in ipairs(utils.Orphans[target_bufnr] or {}) do
+        if item.kind == 'mark' then
+            table.insert(orphans, vim.tbl_extend('force', item, {bufnr=target_bufnr, index=i, filename=filename}))
+        end
+    end
     if #orphans ~= 0 then
-        section('# Orphaned notes (' .. #orphans .. ')')
+        section('# Orphaned marks (' .. #orphans .. ')')
     end
     local function orphan_label(item) return item.char and ('(' .. item.char .. ')') or ('* ' .. note_summary(item.text)) end
     local orphan_width = column_width(vim.tbl_map(orphan_label, orphans), NoteWidth + 2)
-    local orphan_path_width = column_width(vim.tbl_map(function(item) return filename .. ':' .. item.row end, orphans), PathWidthMax)
-    for i, item in ipairs(orphans) do
+    local orphan_path_width = column_width(vim.tbl_map(function(item) return item.filename .. ':' .. item.row end, orphans), PathWidthMax)
+    for _, item in ipairs(orphans) do
         table.insert(content_lines, fit(orphan_label(item), orphan_width))
-        previews[#content_lines] = note_tail(filename .. ':' .. item.row, orphan_path_width, vim.trim(item.line))
-        marks_metadata[#content_lines] = { type = 'orphan', index = i, char = item.char, row = item.row, filename = filename,
-                                           text = item.text, line = item.line, status = item.status, created = item.created }
+        previews[#content_lines] = note_tail(item.filename .. ':' .. item.row, orphan_path_width, vim.trim(item.line or ''))
+        marks_metadata[#content_lines] = { type = 'orphan', bufnr = item.bufnr, index = item.index, char = item.char, row = item.row,
+                                           filename = item.filename, text = item.text, line = item.line, status = item.status,
+                                           created = item.created }
     end
     -- Append each item's path/line text, remembering where the gray part starts
     local gray_from = {}
@@ -421,7 +443,7 @@ function M.openMarks(opt)
         return n.id
     end
     local function same_note(a, b)
-        if a.type ~= 'note' then return false end
+        if a.type ~= 'note' and not (a.type == 'orphan' and a.text) then return false end
         if b.extmark_id and a.extmark_id == b.extmark_id and a.bufnr == b.bufnr then return true end
         local id = record_id(b)
         return id ~= nil and record_id(a) == id  -- e.g. the file was opened meanwhile, so it's now an open-buffer note
@@ -532,7 +554,7 @@ function M.openMarks(opt)
     -- cursor still on it, so pressing @ again keeps cycling the same note
     vim.keymap.set('n', '@', function()
         local mark = M.get_mark_at_cursor()
-        if not (mark and mark.type == 'note') then
+        if not (mark and (mark.type == 'note' or mark.type == 'orphan' and mark.text)) then
             vim.api.nvim_echo({{'Not on a note', 'WarningMsg'}}, false, {})
             return
         end
@@ -602,7 +624,8 @@ function M.openMarks(opt)
             elseif mark.type == 'note' then
                 utils.edit_stored(mark.store_path, mark.id, nil)
             elseif mark.type == 'orphan' then
-                utils.delete_orphan(target_bufnr, mark.index)
+                utils.delete_orphan(mark.bufnr, mark.index)
+                utils.save_all(mark.bufnr)  -- another file's: its own save on leave doesn't run from here
             end
             vim.cmd('bwipeout!')
             vim.api.nvim_echo({{'Deleted ' .. label, 'Normal'}}, false, {})
@@ -619,17 +642,30 @@ function M.openMarks(opt)
 end
 
 --- Show an orphaned note (its line isn't in the file any more) to read: its text, and the line it was on. Read only;
---- q quits, <Backspace> or `[[` goes back to the menu. Its status can't be changed here (yet).
+--- q quits, <Backspace> or `[[` goes back to the menu, @ changes its status.
 function M.read_orphan(item)
     local origin = MenuOrigin
     local bufnr = M.create_window()
     M.use_markdown(bufnr)
-    local symbol = require('nvim-marks.marks_file').STATUS_SYMBOLS[item.status or 'open']
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, item.text)
     vim.bo[bufnr].modifiable = false
     utils.align_tables(bufnr, NS_Tables)  -- the text is set after the FileType autocmd ran
-    local hint = 'Orphaned note: its line is gone (' .. item.filename .. ':' .. item.row .. ') | read only | q quit | <Backspace> return to main menu'
-    vim.wo.winbar = '%#Comment#' .. ((symbol ~= '' and symbol .. ' ' or '') .. hint):gsub('%%', '%%%%')
+    local function show_hint()
+        local status = item.status or 'open'
+        local symbol = require('nvim-marks.marks_file').STATUS_SYMBOLS[status]
+        local hint = StatusTitles[status] .. ' | Orphaned note: its line is gone (' .. item.filename .. ':' .. item.row
+                     .. ') | read only | q quit | <Backspace> return to main menu | @ change status'
+        vim.wo.winbar = '%#Comment#' .. ((symbol ~= '' and symbol .. ' ' or '') .. hint):gsub('%%', '%%%%')
+    end
+    show_hint()
+    -- Key: next status, saved right away
+    if item.bufnr and item.index then
+        vim.keymap.set('n', '@', function()
+            local status = M.cycle_status(item)
+            show_hint()
+            vim.api.nvim_echo({{'Status: ' .. StatusTitles[status], 'Normal'}}, false, {})
+        end, {buffer=bufnr, silent=true, nowait=true})
+    end
     vim.api.nvim_buf_set_extmark(bufnr, NS_Preview, 0, 0, {virt_lines_above=true, virt_lines={
         {{'was on: ' .. vim.trim(item.line or ''), 'Comment'}}, {{'', 'Normal'}},
     }})
@@ -640,7 +676,7 @@ function M.read_orphan(item)
         vim.cmd('bwipeout!')
         if origin and vim.api.nvim_win_is_valid(origin.win) then
             vim.api.nvim_set_current_win(origin.win)
-            M.openMarks()
+            M.openMarks({focus=item})
         end
     end
     vim.keymap.set('n', '<BS>', back, {buffer=bufnr, silent=true, nowait=true})
@@ -660,7 +696,12 @@ end
 --- @return string # the new status
 function M.cycle_status(note)
     local status = utils.next_status(note.status)
-    if note.extmark_id then
+    if note.type == 'orphan' or note.orphan then
+        -- its line isn't in the open file: change it in the buffer's orphans, which are saved as they are
+        local record = (utils.Orphans[note.bufnr] or {})[note.index]
+        if record then record.status = status ~= 'open' and status or nil end
+        utils.save_all(note.bufnr)
+    elseif note.extmark_id then
         utils.set_note_status(note.bufnr, note.extmark_id, status)
         utils.save_all(note.bufnr)
     else
