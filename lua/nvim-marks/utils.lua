@@ -521,6 +521,11 @@ function M.restore_marks(bufnr)
             -- e.g. on another branch: keep it, it's tried again next time the file is opened
             table.insert(M.Orphans[bufnr], record)
             track(bufnr, record.id)
+            if record.kind == 'note' then
+                -- saved back with every save, so remember it as loaded: an edit made elsewhere (an agent's reply) wins
+                M.LoadedTexts[bufnr][record.id] = record.text
+                M.LoadedStatuses[bufnr][record.id] = record.status or false
+            end
         elseif record.kind == 'mark' then
             vim.api.nvim_buf_set_mark(bufnr, record.char, row, 0, {})
             M.RecordIds[bufnr].marks[record.char] = track(bufnr, record.id)

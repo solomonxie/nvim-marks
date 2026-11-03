@@ -221,6 +221,35 @@ function T.test_save_keeps_changes_made_elsewhere()
     vim.fn.delete(tmp_dir, 'rf')
 end
 
+--- A note whose line isn't in the file (an orphan) is saved back as it was: a reply and status an agent wrote
+--- meanwhile are kept, not reverted by nvim's next save
+function T.test_save_keeps_orphan_changed_elsewhere()
+    local tmp_dir = vim.fn.resolve(vim.fn.tempname())
+    vim.fn.mkdir(tmp_dir, 'p')
+    marks_file.dir_option = tmp_dir
+    local path = tmp_dir .. '/f.lua'
+    local store_path = tmp_dir .. '/_no_repo/' .. marks_file.FILE_NAME
+    vim.fn.writefile(read_fixture('v1.lua'), path)
+    vim.fn.mkdir(vim.fs.dirname(store_path), 'p')
+    marks_file.save(store_path, {{id='orphan01', file=path, kind='note', text={'question'}, row=3,
+                                  line='no such line', above={}, below={}}})
+    vim.cmd('edit ' .. path)
+    local bufnr = vim.api.nvim_get_current_buf()
+    M.restore_marks(bufnr)
+    eq(#M.Orphans[bufnr], 1, 'loaded as an orphan')
+    local a = marks_file.load(store_path)[1]
+    a.status = 'todo'
+    a.text = {'question', '--', 'Bot reply:', 'answer'}
+    marks_file.save(store_path, {a})
+    M.save_all(bufnr)
+    local saved = marks_file.load(store_path)[1]
+    eq(saved.text, {'question', '--', 'Bot reply:', 'answer'}, 'reply kept')
+    eq(saved.status, 'todo', 'status set elsewhere kept')
+    vim.cmd('bwipeout!')
+    marks_file.dir_option = nil
+    vim.fn.delete(tmp_dir, 'rf')
+end
+
 --- An agent moves a note to another file while nvim has its file open: nvim's next save doesn't pull it back,
 --- and the buffer drops it
 function T.test_save_keeps_note_moved_elsewhere()
