@@ -98,7 +98,7 @@ function T.test_merge_file_keeps_move_elsewhere()
     on_disk[1].file, on_disk[1].row, on_disk[1].line = 'jobs/other.py', 7, 'def other('
     local loaded = {[id]=records[1].text}
     local merged, changed = M.merge_file(on_disk, 'jobs/common.py', {in_nvim, records[3]}, {[id]=true, [records[3].id]=true},
-                                         loaded, {[id]=true}, {[id]=false}, {[id]='jobs/common.py'})
+                                         loaded, {[id]=true}, {[id]='jobs/common.py'})
     eq({merged[1].file, merged[1].row, merged[1].line}, {'jobs/other.py', 7, 'def other('}, 'move kept')
     eq(#merged, 3, 'not written back here as well')
     eq(changed, false, 'nothing to write')
@@ -111,25 +111,25 @@ function T.test_merge_file_follows_rename()
     local renamed = vim.deepcopy(records[1])
     renamed.file = 'jobs/shared.py'
     local merged, changed = M.merge_file(records, 'jobs/shared.py', {renamed}, {[id]=true},
-                                         {[id]=records[1].text}, {[id]=true}, {[id]=false}, {[id]='jobs/common.py'})
+                                         {[id]=records[1].text}, {[id]=true}, {[id]='jobs/common.py'})
     eq({merged[1].id, merged[1].file}, {id, 'jobs/shared.py'}, 'moved to the new key, same place')
     eq(changed, true, 'written')
     local unknown = M.merge_file(records, 'jobs/shared.py', {renamed}, {[id]=true})
     eq(unknown[1].file, 'jobs/shared.py', 'no loaded file known: still a rename')
 end
 
---- A note edited here and moved elsewhere meanwhile: the move is kept, with the text and status edited here
+--- A note edited here and moved elsewhere meanwhile: the move is kept, with the text edited here
 function T.test_merge_file_move_elsewhere_keeps_edit_here()
     local records = M.load(fixture_path('marks.jsonl'))
     local id = records[1].id
     local in_nvim = vim.deepcopy(records[1])
-    in_nvim.text, in_nvim.status = {'why fetch it again?', 'edited here'}, 'todo'
+    in_nvim.text = {'why fetch it again?', 'edited here'}
     local on_disk = vim.deepcopy(records)
     on_disk[1].file, on_disk[1].row = 'jobs/other.py', 7
     local merged, changed = M.merge_file(on_disk, 'jobs/common.py', {in_nvim}, {[id]=true},
-                                         {[id]=records[1].text}, {[id]=true}, {[id]=false}, {[id]='jobs/common.py'})
+                                         {[id]=records[1].text}, {[id]=true}, {[id]='jobs/common.py'})
     eq({merged[1].file, merged[1].row}, {'jobs/other.py', 7}, 'location from the move')
-    eq({merged[1].text, merged[1].status}, {in_nvim.text, 'todo'}, 'text and status from here')
+    eq(merged[1].text, in_nvim.text, 'text from here')
     eq(changed, true, 'written')
 end
 
@@ -157,7 +157,6 @@ function T.test_append_log()
     local b = {id='bbbb0002', file='src/a.lua', kind='mark', char='a', row=5, line='y = 2', above={}, below={}}
     M.save(store_path, {a, b})
     local a2 = vim.deepcopy(a)
-    a2.status = 'todo'
     a2.text = {'why?', '--', 'Bot reply:', 'because'}
     M.save(store_path, {a2})  -- a updated, b deleted
     M.save(store_path, {a2})  -- no change: nothing logged
@@ -165,25 +164,19 @@ function T.test_append_log()
     eq(vim.tbl_map(function(e) return e.op .. ' ' .. e.id end, log), {'add aaaa0001', 'add bbbb0002', 'update aaaa0001', 'delete bbbb0002'}, 'one line per change')
     eq(log[3].before.text, 'why?', 'update keeps the old text')
     eq(log[3].after.text, 'why?\n--\nBot reply:\nbecause', 'and the new text')
-    eq(log[3].after.status, 'todo', 'and the new status')
     eq(log[4].before.char, 'a', 'delete keeps the whole record')
     eq(log[1].ts:match('^%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%d%.%d%d%dZ$') ~= nil, true, 'UTC timestamp with ms')
     vim.fn.delete(tmp_dir, 'rf')
 end
 
-function T.test_status_from_prefixes()
-    local function conv(text) return M.status_from_prefixes({kind='note', text=text}) end
-    eq(conv({'(⏺) why?', '--', 'Bot reply:'}), {kind='note', status='todo', text={'why?', '--', 'Bot reply:'}}, 'todo')
-    eq(conv({'(ok) what is it?'}), {kind='note', status='done', text={'what is it?'}}, 'ok = done')
-    eq(conv({'(#) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'anchor')
-    eq(conv({'(-) main entry'}), {kind='note', status='anchor', text={'main entry'}}, 'old anchor symbol')
-    eq(conv({'(ok) (⏺) why?'}), {kind='note', status='done', text={'why?'}}, 'done wins over todo')
-    eq(M.status_from_prefixes({kind='note', status='read', text={'x'}}).status, 'done', 'old read status renamed')
-    eq(M.status_from_prefixes({kind='note', status='answered', text={'x'}}).status, 'todo', 'old answered status renamed')
-    eq(M.status_from_prefixes({kind='note', status='archived', text={'x'}}).status, 'done', 'old archived status renamed')
-    eq(conv({'(note) not a status'}), {kind='note', text={'(note) not a status'}}, 'unknown tag left in the text')
-    eq(conv({'plain'}), {kind='note', text={'plain'}}, 'no prefix: no status (open)')
-    eq(M.status_from_prefixes({kind='note', status='open', text={'(⏺) x'}}).text, {'(⏺) x'}, 'has a status already: untouched')
+function T.test_status_field_dropped_and_text_kept()
+    local records = M.load(fixture_path('marks-with-status.jsonl'))
+    eq(#records, 3, 'all loaded')
+    eq(records[1].status, nil, 'todo status dropped')
+    eq(records[1].text, {'(⏺) why?', '--', 'Bot reply:'}, 'text with a symbol kept as written')
+    eq(records[2].status, nil, 'done status dropped')
+    eq(records[2].text, {'(.) main entry'}, 'text with (.) kept as written')
+    eq(records[3].text, {'(⏺) typed by hand'}, 'no status field: text kept')
 end
 
 function T.test_with_lock_waits_for_another_writer()

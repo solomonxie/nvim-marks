@@ -4,9 +4,8 @@ let g:nvim_marks_restore_global = get(g:, 'nvim_marks_restore_global', 1)  "Set 
 " let g:nvim_marks_dir = '~/notes/marks'  "Marks saved to <dir>/<repo>/marks.jsonl, default dir: stdpath('data')/nvim-marks
 " let g:nvim_marks_show_note_text = 0  "Start with notes' text hidden (only the * sign shows); :NvimMarksNoteToggle flips it
 
-" Keymaps:
-map m <C-m>
-nnoremap <silent> <nowait> m :lua require('nvim-marks').openMarks()<CR>
+" Keymaps: none; map the marks window yourself, e.g.
+"   nnoremap <silent> fm <Cmd>lua require('nvim-marks').openMarks()<CR>
 
 " Commands:
 command! -bang NvimMarksNoteToggle lua require('nvim-marks').toggleNoteText('<bang>' == '!')

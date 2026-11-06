@@ -24,45 +24,11 @@ M.FILE_NAME = 'marks.jsonl'
 M.LOG_FILE_NAME = 'marks-log.jsonl'  -- next to the store: every add/update/delete, appended, never rewritten
 local KnownRoots = {}  --- @type table<string, table<string, boolean>> # {store_path={root=true}}: checkouts seen this session
 local OLD_FILE_NAME = 'marks-history.json'  -- previous format, read once when there's no marks.jsonl yet
-local KEY_ORDER = {'id', 'file', 'kind', 'char', 'status', 'text', 'row', 'line', 'above', 'below', 'commit', 'created'}
+local KEY_ORDER = {'id', 'file', 'kind', 'char', 'text', 'row', 'line', 'above', 'below', 'commit', 'created'}
 
 --- @return string # now, as a record's `created` time: UTC, to the second, sorts as text
 function M.now()
     return os.date('!%Y-%m-%dT%H:%M:%SZ')
-end
-
---- A note's status, in the order `@` cycles through them and the marks list shows them
-M.STATUSES = {'open', 'todo', 'anchor', 'done'}
---- Shown in front of a note (marks list, code line, editor bar); stored only as `status`, never in the text
-M.STATUS_SYMBOLS = {open='', todo='(⏺)', done='(ok)', anchor='(#)'}
---- Statuses from earlier versions, read as their current name
-local OLD_STATUS = {answered='todo', archived='done', read='done'}
---- Text prefixes the status replaces: `(⏺) ` todo, `(ok) ` done, `(#) ` anchor (`(-)` was anchor's earlier symbol)
-local PREFIX_STATUS = {['(⏺)']='todo', ['(ok)']='done', ['(#)']='anchor', ['(-)']='anchor', ['(x)']='done'}
-
---- Move a note's old text prefixes into `status`, removing them from the text (once, on read)
---- Also renames statuses from earlier versions (`answered` is now `todo`, `archived` and `read` are `done`).
----
---- @return table # the same record
-function M.status_from_prefixes(record)
-    if record.status and OLD_STATUS[record.status] then record.status = OLD_STATUS[record.status] end
-    if record.kind ~= 'note' or record.status then return record end
-    local text = record.text
-    if type(text) ~= 'table' or #text == 0 then return record end
-    local first, status = text[1], nil
-    while true do
-        local tag, rest = first:match('^(%b())%s*(.*)$')
-        if not tag or not PREFIX_STATUS[tag] then break end
-        -- done wins over todo (`(ok) (⏺) ...` means done)
-        local s = PREFIX_STATUS[tag]
-        if status == nil or s == 'done' then status = s end
-        first = rest
-    end
-    if status then
-        record.text = vim.list_extend({first}, vim.list_slice(text, 2))
-        record.status = status
-    end
-    return record
 end
 
 --- Work files kept under the marks folder (`<dir>/<repo>/...`) belong with that repo's marks
@@ -167,7 +133,7 @@ function M.decode_record(json_line)
     local ok, record = pcall(vim.json.decode, json_line)
     if not ok or type(record) ~= 'table' or not record.id or not record.file then return nil end
     if type(record.text) == 'string' then record.text = vim.split(record.text, '\n', {plain=true}) end
-    M.status_from_prefixes(record)
+    record.status = nil  -- notes had a status once: dropped on the next save
     if record.line_b64 then  -- written briefly by an earlier version
         local decoded_ok, line = pcall(vim.base64.decode, record.line_b64)
         record.line = decoded_ok and line or ''
@@ -291,6 +257,24 @@ function M.lock_path(store_path)
     return M.LOCK_DIR .. '/' .. vim.fs.basename(dir) .. '-' .. vim.fn.sha256(real):sub(1, 16) .. '.lock'
 end
 
+--- While a note is open in the editor: `<lock_path minus .lock>-<note id>.editing`, holding the unix time it
+--- expires. Writers outside nvim (the marks skill) leave that note alone until it's gone or expired; refreshed
+--- while typing, removed when the editor closes, and stale ones (nvim crashed) simply expire.
+M.EDITING_TTL_S = 120
+
+function M.editing_path(store_path, id)
+    return (M.lock_path(store_path):gsub('%.lock$', '')) .. '-' .. id .. '.editing'
+end
+
+function M.mark_editing(store_path, id)
+    vim.fn.mkdir(M.LOCK_DIR, 'p')
+    vim.fn.writefile({tostring(os.time() + M.EDITING_TTL_S)}, M.editing_path(store_path, id))
+end
+
+function M.unmark_editing(store_path, id)
+    vim.fn.delete(M.editing_path(store_path, id))
+end
+
 local ffi_ok, ffi = pcall(require, 'ffi')
 if ffi_ok then
     ffi_ok = pcall(ffi.cdef, 'int flock(int fd, int operation);')
@@ -368,7 +352,6 @@ end
 --- elsewhere (an agent, another nvim): it's dropped, not written back, unless its text was edited here.
 ---
 --- @param known table<string, boolean> # ids this nvim loaded or created for the file
---- The same goes for a note's status: one this nvim didn't change since loading keeps the status on disk.
 ---
 --- @param loaded_texts table<string, string[]>|nil # {id=text} of notes as this nvim last loaded or saved them
 --- @param on_disk table<string, boolean>|nil # ids this nvim has loaded from or saved to the store
@@ -377,30 +360,24 @@ end
 ---   renamed (e.g. `git mv`): this buffer's copy is written, under the new key, in the same place.
 --- - moved elsewhere: its file on disk isn't that key, so someone (an agent, another nvim) moved it to another file
 ---   since: the move is kept and this buffer's copy isn't written back (the buffer then reloads without it).
----   A text or status edited here since loading is carried onto the moved record, so the edit isn't lost: it ends
----   up in the note at its new file. Untouched text and status stay as they are on disk.
+---   A text edited here since loading is carried onto the moved record, so the edit isn't lost: it ends
+---   up in the note at its new file. Untouched text stays as they are on disk.
 --- Without an entry in `loaded_files` (or without `loaded_files`), it's taken as a rename.
 ---
---- @param loaded_statuses table<string, string|false>|nil # {id=status} as last loaded or saved (false: none)
 --- @param loaded_files table<string, string>|nil # {id=file} the file key each record had when last loaded or saved
 --- @return table[], boolean # merged records, whether anything changed
-function M.merge_file(records, file, current, known, loaded_texts, on_disk, loaded_statuses, loaded_files)
+function M.merge_file(records, file, current, known, loaded_texts, on_disk, loaded_files)
     local by_id = {}
     for _, record in ipairs(current) do by_id[record.id] = record end
     local merged, changed, seen = {}, false, {}
     for _, record in ipairs(records) do
         local loaded_file = loaded_files and loaded_files[record.id]
         if record.file ~= file and by_id[record.id] and loaded_file and record.file ~= loaded_file then
-            -- moved to another file elsewhere: keep it there, with any text/status edited here carried along
+            -- moved to another file elsewhere: keep it there, with any text edited here carried along
             local here, kept = by_id[record.id], record
             local loaded = loaded_texts and loaded_texts[record.id]
             if here.kind == 'note' and loaded and not vim.deep_equal(here.text, loaded) then
                 kept = vim.tbl_extend('force', kept, {text=here.text})
-            end
-            local loaded_status = loaded_statuses and loaded_statuses[record.id]
-            if here.kind == 'note' and loaded_status ~= nil and (here.status or false) ~= loaded_status then
-                kept = vim.deepcopy(kept)
-                kept.status = here.status
             end
             if kept ~= record then changed = true end
             table.insert(merged, kept)
@@ -426,11 +403,6 @@ function M.merge_file(records, file, current, known, loaded_texts, on_disk, load
                 and vim.deep_equal(new.above, record.above) and vim.deep_equal(new.below, record.below) then
                 new = vim.tbl_extend('force', new, {commit=record.commit})  -- same anchor: keep the commit it was taken at
             end
-            local loaded_status = loaded_statuses and loaded_statuses[record.id]
-            if new.kind == 'note' and loaded_status ~= nil and (new.status or false) == loaded_status then
-                new = vim.deepcopy(new)
-                new.status = record.status  -- not changed here: keep theirs
-            end
             if M.encode_record(new) ~= M.encode_record(record) then changed = true end
             table.insert(merged, new)
             seen[record.id] = true
@@ -452,18 +424,17 @@ function M.merge_file(records, file, current, known, loaded_texts, on_disk, load
     return merged, changed
 end
 
---- Change a record's text and/or status, or delete it (text=nil and no status)
-function M.edit_record(store_path, id, text, status)
-    M.with_lock(store_path, function() M.edit_record_unlocked(store_path, id, text, status) end)
+--- Change a record's text, or delete it (text=nil)
+function M.edit_record(store_path, id, text)
+    M.with_lock(store_path, function() M.edit_record_unlocked(store_path, id, text) end)
 end
 
-function M.edit_record_unlocked(store_path, id, text, status)
+function M.edit_record_unlocked(store_path, id, text)
     local records = M.load(store_path)
     for i, record in ipairs(records) do
         if record.id == id then
-            if text or status then
-                if text then record.text = text end
-                if status then record.status = status end
+            if text then
+                record.text = text
             else
                 table.remove(records, i)
             end

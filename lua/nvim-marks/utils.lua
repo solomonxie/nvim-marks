@@ -7,9 +7,7 @@ local git = require('nvim-marks.git')
 M.NS_Signs = vim.api.nvim_create_namespace('nvim-marks.signs')
 M.NS_Notes = vim.api.nvim_create_namespace('nvim-marks.notes')
 M.NoteTexts = {}  --- @type table<integer, table<integer, string[]>> # {bufnr={mark_id=lines}}
-M.NoteStatuses = {}  --- @type table<integer, table<integer, string>> # {bufnr={mark_id=status}}; missing = open
 M.NoteCreated = {}  --- @type table<integer, table<integer, string>> # {bufnr={mark_id=created time}}, see marks_file.now
-M.LoadedStatuses = {}  --- @type table<integer, table<string, string|false>> # {bufnr={id=status}} as last loaded/saved
 M.note_style = vim.g.nvim_marks_note_style or 'inline'  --- @type 'inline'|'above' # set by setup()
 M.note_prefix = '    -- '  --- @type string # before an inline note
 M.show_note_text = vim.g.nvim_marks_show_note_text ~= 0  --- @type boolean # false: only the `*` sign shows, not the text
@@ -128,12 +126,6 @@ local function track(bufnr, id)
     return id
 end
 
---- @return string # `(⏺) `-style symbol for a status, with a trailing space; empty for open notes
-function M.status_prefix(status)
-    local symbol = marks_file.STATUS_SYMBOLS[status or 'open'] or ''
-    return symbol ~= '' and (symbol .. ' ') or ''
-end
-
 --- @return string # a note's lines on one line, joined by single spaces; empty lines dropped
 function M.one_line(text)
     local parts = {}
@@ -164,7 +156,7 @@ end
 
 --- Get notes(extmarks) from given buffer
 ---
---- @return table[] # list of extmark details [{mark_id, row, text, status, created}, {...}]; status nil = open
+--- @return table[] # list of extmark details [{mark_id, row, text, created}, {...}]
 function M.scan_notes(bufnr)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Note texts are kept by real bufnr
     local notes = {}
@@ -172,30 +164,9 @@ function M.scan_notes(bufnr)
     for _, ext in ipairs(items) do
         local mark_id, row, _ = unpack(ext)
         local text = (M.NoteTexts[bufnr] or {})[mark_id] or {}
-        table.insert(notes, {mark_id, row+1, text, (M.NoteStatuses[bufnr] or {})[mark_id], (M.NoteCreated[bufnr] or {})[mark_id]})
+        table.insert(notes, {mark_id, row+1, text, (M.NoteCreated[bufnr] or {})[mark_id]})
     end
     return notes
-end
-
---- @return string # the status after `status` in the cycle (open → todo → anchor → done → open)
-function M.next_status(status)
-    local list = marks_file.STATUSES
-    for i, s in ipairs(list) do
-        if s == (status or 'open') then return list[i % #list + 1] end
-    end
-    return list[1]
-end
-
---- Set an open buffer's note status and redraw it (its symbol is shown in front of the text)
-function M.set_note_status(bufnr, mark_id, status)
-    M.NoteStatuses[bufnr] = M.NoteStatuses[bufnr] or {}
-    M.NoteStatuses[bufnr][mark_id] = status ~= 'open' and status or nil
-    local ext = vim.api.nvim_buf_get_extmark_by_id(bufnr, M.NS_Notes, mark_id, {})
-    if ext[1] then
-        local opts = M.note_display_opts((M.NoteTexts[bufnr] or {})[mark_id] or {}, status)
-        opts.id = mark_id
-        vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, ext[1], ext[2], opts)
-    end
 end
 
 --- Create a note extmark
@@ -205,29 +176,25 @@ end
 --- @param row integer # 1-indexed
 --- @param record_id string|nil # id of the saved record it came from, nil for a new note
 --- @return table # extmark options that draw a note: the `*` sign, plus its text unless note text is turned off
-local function note_display(text, status)
+local function note_display(text)
     local opts = {sign_text='*', sign_hl_group='Comment'}
     if not M.show_note_text then return opts end
     if M.note_style == 'above' then
         opts.virt_lines_above = true
         opts.virt_lines = vim.tbl_map(function(line) return {{line, 'Comment'}} end, text)
-        if opts.virt_lines[1] then opts.virt_lines[1][1][1] = M.status_prefix(status) .. opts.virt_lines[1][1][1] end
     else
-        opts.virt_text = {{M.note_prefix .. M.status_prefix(status) .. M.one_line(text), 'Comment'}}  -- gray, like a comment
+        opts.virt_text = {{M.note_prefix .. M.one_line(text), 'Comment'}}  -- gray, like a comment
         opts.virt_text_pos = 'eol'
     end
     return opts
 end
 
-function M.note_display_opts(text, status) return note_display(text, status) end
+function M.note_display_opts(text) return note_display(text) end
 
---- @param status string|nil # open/todo/anchor/done; nil = open
 --- @param created string|nil # when the note was first saved; nil for a new one (now)
-function M.set_note(bufnr, row, text, record_id, status, created)
+function M.set_note(bufnr, row, text, record_id, created)
     if bufnr == 0 then bufnr = vim.api.nvim_get_current_buf() end  -- Note texts are kept by real bufnr
-    local mark_id = vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row-1, 0, note_display(text, status))  -- extmark is 0-indexed
-    M.NoteStatuses[bufnr] = M.NoteStatuses[bufnr] or {}
-    M.NoteStatuses[bufnr][mark_id] = status ~= 'open' and status or nil
+    local mark_id = vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row-1, 0, note_display(text))  -- extmark is 0-indexed
     -- Shown text is joined for display, keep the original lines for saving and editing
     M.NoteTexts[bufnr] = M.NoteTexts[bufnr] or {}
     M.NoteTexts[bufnr][mark_id] = text
@@ -248,7 +215,7 @@ function M.toggle_note_text(show)
         if vim.api.nvim_buf_is_valid(bufnr) then
             for _, ext in ipairs(vim.api.nvim_buf_get_extmarks(bufnr, M.NS_Notes, 0, -1, {})) do
                 local mark_id, row, col = unpack(ext)
-                local opts = note_display(texts[mark_id] or {}, (M.NoteStatuses[bufnr] or {})[mark_id])
+                local opts = note_display(texts[mark_id] or {})
                 opts.id = mark_id  -- same extmark redrawn, so its record id and position stay
                 vim.api.nvim_buf_set_extmark(bufnr, M.NS_Notes, row, col, opts)
             end
@@ -328,22 +295,21 @@ function M.save_all(bufnr)
         table.insert(current, record(ids.marks[char], 'mark', row, {char=char}))
     end
     for _, item in ipairs(M.scan_notes(bufnr)) do
-        local mark_id, row, text, status, created = unpack(item)
+        local mark_id, row, text, created = unpack(item)
         ids.notes[mark_id] = ids.notes[mark_id] or track(bufnr, marks_file.new_id())
-        table.insert(current, record(ids.notes[mark_id], 'note', row, {text=text, status=status, created=created}))
+        table.insert(current, record(ids.notes[mark_id], 'note', row, {text=text, created=created}))
     end
     vim.list_extend(current, M.Orphans[bufnr] or {})  -- saved as they were
     -- Re-read right before writing, another nvim (e.g. in another worktree) may have saved meanwhile
     for _, orphan in ipairs(M.Orphans[bufnr] or {}) do track(bufnr, orphan.id) end
     M.LoadedTexts[bufnr] = M.LoadedTexts[bufnr] or {}
     M.OnDisk[bufnr] = M.OnDisk[bufnr] or {}
-    M.LoadedStatuses[bufnr] = M.LoadedStatuses[bufnr] or {}
     M.LoadedFiles[bufnr] = M.LoadedFiles[bufnr] or {}
     -- Locked from the read to the write, so another nvim or an agent can't write in between and be overwritten
     local records, changed
     marks_file.with_lock(store_path, function()
         records, changed = marks_file.merge_file(marks_file.load(store_path), key, current, ids.known, M.LoadedTexts[bufnr],
-                                                 M.OnDisk[bufnr], M.LoadedStatuses[bufnr], M.LoadedFiles[bufnr])
+                                                 M.OnDisk[bufnr], M.LoadedFiles[bufnr])
         if changed then
             marks_file.save(store_path, records)
             M.LoadedAt[bufnr] = marks_file.mtime(store_path)  -- our own write, not a change to reload
@@ -358,7 +324,6 @@ function M.save_all(bufnr)
     for _, item in ipairs(current) do
         if item.kind == 'note' then
             M.LoadedTexts[bufnr][item.id] = item.text
-            M.LoadedStatuses[bufnr][item.id] = item.status or false
         end
     end
     -- What's on disk now (theirs merged with ours) is what this buffer should show: reload it when anything
@@ -407,7 +372,7 @@ end
 function M.record_key(record)
     local text = record.text
     if type(text) == 'table' then text = table.concat(text, '\n') end
-    return (record.kind or '') .. '|' .. (record.char or '') .. '|' .. (record.status or 'open') .. '|' .. (text or '')
+    return (record.kind or '') .. '|' .. (record.char or '') .. '|' .. (text or '')
 end
 
 --- Show what's in the store for this buffer now (another nvim or an agent changed it), without saving first
@@ -494,9 +459,7 @@ function M.restore_marks(bufnr)
     -- Start clean, `:e!` can keep some old note extmarks
     vim.api.nvim_buf_clear_namespace(bufnr, M.NS_Notes, 0, -1)
     M.NoteTexts[bufnr] = {}
-    M.NoteStatuses[bufnr] = {}
     M.NoteCreated[bufnr] = {}
-    M.LoadedStatuses[bufnr] = {}
     M.RecordIds[bufnr] = {marks={}, notes={}, known={}}
     M.Orphans[bufnr] = {}
     M.LoadedTexts[bufnr] = {}
@@ -528,7 +491,6 @@ function M.restore_marks(bufnr)
             if record.kind == 'note' then
                 -- saved back with every save, so remember it as loaded: an edit made elsewhere (an agent's reply) wins
                 M.LoadedTexts[bufnr][record.id] = record.text
-                M.LoadedStatuses[bufnr][record.id] = record.status or false
             end
         elseif record.kind == 'mark' then
             vim.api.nvim_buf_set_mark(bufnr, record.char, row, 0, {})
@@ -536,9 +498,8 @@ function M.restore_marks(bufnr)
         elseif M.is_empty_note(record.text) then
             track(bufnr, record.id)  -- emptied (e.g. by an agent or by hand): counts as deleted, dropped on save
         else
-            M.set_note(bufnr, row, record.text, record.id, record.status, record.created)
+            M.set_note(bufnr, row, record.text, record.id, record.created)
             M.LoadedTexts[bufnr][record.id] = record.text
-            M.LoadedStatuses[bufnr][record.id] = record.status or false
         end
     end
 end
@@ -586,9 +547,9 @@ function M.with_store_lock(where, fn)
     return marks_file.with_lock(store_path, fn)
 end
 
---- Change (text and/or status) or delete (neither) a note/mark saved for a file that isn't open
-function M.edit_stored(store_path, id, text, status)
-    marks_file.edit_record(store_path, id, text, status)
+--- Change (text) or delete (text=nil) a note/mark saved for a file that isn't open
+function M.edit_stored(store_path, id, text)
+    marks_file.edit_record(store_path, id, text)
 end
 
 --- Every note and mark saved for the repo of `bufnr`, for listing files that aren't open

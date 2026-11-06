@@ -66,7 +66,7 @@ git clone https://github.com/solomonxie/nvim-marks.git ~/.config/nvim/pack/plugi
 
 ## 🎯 Quick Start
 
-1. **Open Marks Window**: Press `m` in any buffer
+1. **Open Marks Window**: the plugin maps no keys; map `require('nvim-marks').openMarks()` yourself, e.g. `nnoremap <silent> fm <Cmd>lua require('nvim-marks').openMarks()<CR>`, then press it in any buffer
 2. **Add Mark**: Press a capital letter `A-Z` in the marks window (except `G` and `N`); other lowercase keys work as usual there
 3. **Add Note**: Press `a` (so `ma` from the code) to add an annotation (or edit the note already on that line)
 4. **Edit Note**: Press `e` on a note in the marks window
@@ -83,7 +83,7 @@ m
 
 " In the marks window:
 " Press A-Z     - Add a global mark at current line (except G, N)
-" Press <Enter> - Jump to the mark/note under the cursor
+" Press <Enter> or o - Go to the mark/note under the cursor (a note opens to edit)
 " Press a       - Add a note/annotation, or edit the one on the current line
 " Press o       - Open the note under the cursor to edit it, or start the tour under it
 " Press -       - Delete the mark/note under the cursor (asks y/n)
@@ -108,7 +108,7 @@ m
 
 ## 🧭 Guided marks (tours)
 
-A tour walks you through code step by step, like a website tutorial. A tour belongs to a piece of work, so put it in that worktree's folder under the marks folder: `<dir>/<repo>/<worktree>/tours-<slug>.jsonl` (`<worktree>` is the checkout's folder name, `main` for the main checkout; subfolders are fine). Any other `.jsonl` there whose first line has a `"tour"` key counts too; `marks.jsonl` and `marks-log.jsonl` never do. The marks window lists them under `# Tours`, above the Anchors section: in a worktree, the tours in its own folder; in the main checkout, every tour of the repo, each with its worktree folder in brackets. `<Enter>` or `o` on one starts guided mode.
+A tour walks you through code step by step, like a website tutorial. A tour belongs to a piece of work, so put it in that worktree's folder under the marks folder: `<dir>/<repo>/<worktree>/tours-<slug>.jsonl` (`<worktree>` is the checkout's folder name, `main` for the main checkout; subfolders are fine). Any other `.jsonl` there whose first line has a `"tour"` key counts too; `marks.jsonl` and `marks-log.jsonl` never do. The marks window lists them under `# Tours`, below the notes: in a worktree, the tours in its own folder; in the main checkout, every tour of the repo, each with its worktree folder in brackets. `<Enter>` or `o` on one starts guided mode.
 
 As you walk a tour, a step whose line is found at a new row (or with edited text) gets that row and text saved back into the tour file, like a note's anchor, so the tour keeps up with the code. Only that step's line in the file is rewritten.
 
@@ -163,9 +163,9 @@ Files kept inside that folder, under a repo's name (e.g. your own notes in `~/no
 
 The marks window is as tall as its content, from 10 lines up to 40% of the screen height. Change the max with `setup({ height = 0.5 })` or a number of lines, `setup({ height = 25 })` (or `let g:nvim_marks_height = 25`).
 
-The marks file is checked every 10 seconds for changes made elsewhere (another nvim, e.g. in another worktree, or a `git pull`), and open files' notes are reloaded. Change it with `setup({ reload_interval = 30 })` or `let g:nvim_marks_reload_interval = 30`; `0` turns it off. A save only removes notes this nvim deleted, never ones added elsewhere that it hasn't loaded yet. A note moved to another file elsewhere (an agent or another nvim changed its `file`) stays moved: the open file drops it on the next reload instead of saving it back. If you edited that note's text or status here before the move reached this nvim, your edit goes with it to the new file. A file renamed with `git mv` is different: its notes, still saved under the old path, move to the new one.
+The marks file is checked every 10 seconds for changes made elsewhere (another nvim, e.g. in another worktree, or a `git pull`), and open files' notes are reloaded. Change it with `setup({ reload_interval = 30 })` or `let g:nvim_marks_reload_interval = 30`; `0` turns it off. A save only removes notes this nvim deleted, never ones added elsewhere that it hasn't loaded yet. A note moved to another file elsewhere (an agent or another nvim changed its `file`) stays moved: the open file drops it on the next reload instead of saving it back. If you edited that note's text here before the move reached this nvim, your edit goes with it to the new file. A file renamed with `git mv` is different: its notes, still saved under the old path, move to the new one.
 
-Each note has a status: open (new notes, listed under **Notes**), `(⏺)` **TODO**, `(ok)` **DONE** (shown in gray), or `(#)` **Anchors** (just a label on the line). The symbol is shown in front of the note in the list, on its code line and in the editor's top bar; it isn't part of the saved text. The marks window lists notes in one section per status: Notes, TODO, then Tours, Anchors, and DONE at the bottom. Press `@` on a note (in the list, or in the note editor) to move it to the next status (Notes → TODO → Anchors → DONE → Notes); the list redraws with the note in its new section and the cursor still on it, so pressing `@` again keeps cycling the same note. DONE notes are dimmed in the list. If a note's text starts with one of these symbols (from earlier versions, or typed by hand), it's turned into that status and removed from the text.
+A note is just text on a line. The marks window lists notes of this file first ("Marked in This File"), then notes of other files ("Marked in Other Files"), then Tours. A `status` field saved by earlier versions is dropped on the next save; the note text is kept as written.
 
 Notes show at the end of their line, like `local x = 1    -- check this`; a multi-line note is shown on one line, its lines joined by spaces. `:NvimMarksNoteToggle` hides or shows the text on every line (the `*` sign stays, and the notes are still in the panel); `:NvimMarksNoteToggle!` always hides. To start hidden: `setup({ show_note_text = false })` or `let g:nvim_marks_show_note_text = 0`. To show them on their own lines above instead: `setup({ note_style = 'above' })` (or `let g:nvim_marks_note_style = 'above'`). Change the `    -- ` before an inline note with `note_prefix`.
 
@@ -197,11 +197,11 @@ For each mark and note, nvim-marks saves an anchor: the row, the line's text, sh
 2. Otherwise look for lines with the same text; the one whose surrounding lines match the hashes best wins, then the one closest to the saved row.
 3. Otherwise fuzzy-match the text (surrounding lines must match too) within 50 rows of the saved row.
 4. Otherwise use the commit saved with it (`"commit"`, HEAD when it was last saved, 12 characters): find the line in the file as it was at that commit, then carry the row through `git diff` to the current file, the way GitHub keeps a PR comment on its line. This finds a line that was rewritten or whose surroundings changed, and follows a file renamed since (the record then moves to the new path). Only for a commit in the current branch's history: a note saved on another branch, or on a commit rebased away, skips this.
-5. Otherwise it's an orphan: a note is listed in the marks window with the other notes of its status, at the row it was saved on, from any buffer; an orphaned mark of this file under "Orphaned marks" (`o` or `<Enter>` opens a note to read, with the line it was on and when it was created; `@` changes its status, there or in the list), kept in the store, and tried again every time the file is opened (e.g. after switching back to the branch where the line exists). Delete it with `-`.
+5. Otherwise it's an orphan: a note is listed in the marks window with the other notes, at the row it was saved on, from any buffer; an orphaned mark of this file under "Orphaned marks" (`o` or `<Enter>` opens a note to read, with the line it was on and when it was created), kept in the store, and tried again every time the file is opened (e.g. after switching back to the branch where the line exists). Delete it with `-`.
 
-The marks window lists the notes of every file in the repo, the current file's first. Every status section lists notes oldest first and the most recent last (a note's `created` time); tours are listed most recent first (a tour's root `created`). Done notes are split into "Marked in This File" and "Marked in Other Files". When the line you opened the window from is a step in a tour (or in a function a tour steps through), "This line appears in tours:" under the Tours section lists those tours; `<Enter>` starts one at that step. `<Enter>` opens the file at the note, `o` opens it to edit, `-` deletes it, even for files that aren't open.
+The marks window lists the notes of every file in the repo, the current file's first. Each section lists notes oldest first and the most recent last (a note's `created` time); tours are listed most recent first (a tour's root `created`). When the line you opened the window from is a step in a tour (or in a function a tour steps through), "This line appears in tours:" under the Tours section lists those tours; `<Enter>` starts one at that step. `<Enter>` or `o` on a note moves the code window to its line (opening the file) and opens the note to read and edit; on a letter mark it just jumps. `-` deletes (after a y/n) and redraws the list in place, even for files that aren't open.
 
-As you move the cursor in the marks window, the code window above shows the mark or note under it, with its cursor on that line. It reuses that one window and opens files the normal way (`:edit`), so they're ordinary buffers with git signs, LSP and the rest; a file it opened is closed again when you move to another file, so only one is open at a time. `q` / `Esc` puts the window back on the file you were on; `<Enter>` or going to the code window keeps what it shows.
+Moving the cursor in the marks window doesn't change the code window; `<Enter>` or `o` goes to the mark or note under it.
 
 ### Data Storage
 

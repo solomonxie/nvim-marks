@@ -205,14 +205,12 @@ function T.test_save_keeps_changes_made_elsewhere()
     -- the agent: replies to A, deletes B, adds C (like the marks skill does: rewrite the file)
     local records = marks_file.load(store_path)
     local a = vim.tbl_filter(function(r) return r.text[1] == 'question A' end, records)[1]
-    a.status = 'todo'
     a.text = {'question A', '--', 'Bot reply:', 'answer'}
     local new = {id='agent001', file=a.file, kind='note', text={'from agent'}, row=3, line=a.line, above={}, below={}}
     marks_file.save(store_path, {a, new})
     M.save_all(bufnr)
     local texts = vim.tbl_map(function(r) return r.text[1] end, marks_file.load(store_path))
     eq(texts, {'question A', 'from agent'}, 'reply kept, deletion kept, new note kept')
-    eq(marks_file.load(store_path)[1].status, 'todo', 'status set elsewhere kept')
     local shown = vim.tbl_map(function(n) return n[3][1] end, M.scan_notes(bufnr))
     table.sort(shown)
     eq(shown, {'from agent', 'question A'}, 'buffer shows the latest')
@@ -221,7 +219,7 @@ function T.test_save_keeps_changes_made_elsewhere()
     vim.fn.delete(tmp_dir, 'rf')
 end
 
---- A note whose line isn't in the file (an orphan) is saved back as it was: a reply and status an agent wrote
+--- A note whose line isn't in the file (an orphan) is saved back as it was: a reply an agent wrote
 --- meanwhile are kept, not reverted by nvim's next save
 function T.test_save_keeps_orphan_changed_elsewhere()
     local tmp_dir = vim.fn.resolve(vim.fn.tempname())
@@ -238,13 +236,11 @@ function T.test_save_keeps_orphan_changed_elsewhere()
     M.restore_marks(bufnr)
     eq(#M.Orphans[bufnr], 1, 'loaded as an orphan')
     local a = marks_file.load(store_path)[1]
-    a.status = 'todo'
     a.text = {'question', '--', 'Bot reply:', 'answer'}
     marks_file.save(store_path, {a})
     M.save_all(bufnr)
     local saved = marks_file.load(store_path)[1]
     eq(saved.text, {'question', '--', 'Bot reply:', 'answer'}, 'reply kept')
-    eq(saved.status, 'todo', 'status set elsewhere kept')
     vim.cmd('bwipeout!')
     marks_file.dir_option = nil
     vim.fn.delete(tmp_dir, 'rf')
@@ -316,17 +312,15 @@ function T.test_one_line()
     eq(M.one_line({'one'}), 'one', 'single line')
 end
 
-function T.test_status_prefix_on_code_line()
+function T.test_note_shown_with_its_text_only()
     local bufnr = vim.api.nvim_create_buf(true, false)
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, read_fixture('v1.lua'))
-    local open_id = M.set_note(bufnr, 3, {'still a question'})
-    local todo_id = M.set_note(bufnr, 8, {'why?', '--', 'Bot reply:', 'because'}, nil, 'todo')
-    local function shown(id) return vim.api.nvim_buf_get_extmark_by_id(bufnr, M.NS_Notes, id, {details=true})[3].virt_text[1][1] end
-    eq(shown(open_id), M.note_prefix .. 'still a question', 'open: no symbol')
-    eq(shown(todo_id), M.note_prefix .. '(⏺) why? -- Bot reply: because', 'todo: symbol in front')
-    eq(M.NoteTexts[bufnr][todo_id][1], 'why?', 'symbol not in the saved text')
-    M.set_note_status(bufnr, open_id, 'done')
-    eq(shown(open_id), M.note_prefix .. '(ok) still a question', 'symbol follows a status change')
+    local id = M.set_note(bufnr, 3, {'still a question'})
+    local multi = M.set_note(bufnr, 8, {'why?', '--', 'Bot reply:', 'because'})
+    local function shown(mark_id) return vim.api.nvim_buf_get_extmark_by_id(bufnr, M.NS_Notes, mark_id, {details=true})[3].virt_text[1][1] end
+    eq(shown(id), M.note_prefix .. 'still a question', 'no symbol')
+    eq(shown(multi), M.note_prefix .. 'why? -- Bot reply: because', 'lines joined, no symbol')
+    eq(M.NoteTexts[bufnr][multi][1], 'why?', 'saved text as typed')
     vim.api.nvim_buf_delete(bufnr, {force=true})
 end
 
@@ -416,7 +410,6 @@ function T.test_note_created_kept()
     bufnr = vim.fn.bufadd(path)
     vim.fn.bufload(bufnr)
     M.restore_marks(bufnr)
-    M.set_note_status(bufnr, M.scan_notes(bufnr)[1][1], 'todo')
     M.save_all(bufnr)
     eq(marks_file.load(store_path)[1].created, created, 'kept after reloading and saving again')
     vim.api.nvim_buf_delete(bufnr, {force=true})
