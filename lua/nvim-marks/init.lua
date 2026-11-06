@@ -277,23 +277,22 @@ function M.openMarks(opt)
                                  created=item.created})
         end
     end
-    -- Oldest first and the most recent last in each section (`created`, UTC text that sorts by time); notes from
-    -- before it was saved have none and come first, by path then row, so the order never depends on where the menu
-    -- was opened
+    -- Newest first in each section (`created`, UTC text that sorts by time); notes from before it was saved have
+    -- none and come last, by path then row, so the order never depends on where the menu was opened
     table.sort(notes, function(a, b)
-        if (a.created or '') ~= (b.created or '') then return (a.created or '') < (b.created or '') end
+        if (a.created or '') ~= (b.created or '') then return (a.created or '') > (b.created or '') end
         if a.filename ~= b.filename then return a.filename < b.filename end
         return a.row < b.row
     end)
     -- Columns line up across both sections
+    local dates = {}  -- {window_row=byte col where the date starts}, drawn in gray
     local function labeled(note)
-        note.label = note.label or note_summary(note.text)
+        note.label = note.label or ((note.orphan and '(line gone) ' or '') .. note_summary(note.text))
         return note.label
     end
     local note_width = column_width(vim.tbl_map(labeled, notes), NoteWidth)
     local path_width = column_width(vim.tbl_map(function(note) return note.filename .. ':' .. note.row end, notes), PathWidthMax)
     local number_width = #tostring(#notes)
-    local dimmed = {}  -- {window_row=true}: rows drawn all in gray
     local i = 0
     -- Tours (guided marks): this worktree's work-files folder, or every worktree's from the main checkout (see
     -- marks_file.tours_dir); <CR> on one starts guided mode. Listed below the notes.
@@ -345,7 +344,11 @@ function M.openMarks(opt)
             for _, note in ipairs(g.notes) do
                 i = i + 1
                 local number = string.rep(' ', number_width - #tostring(i)) .. i .. '.'
-                table.insert(content_lines, number .. ' ' .. fit(labeled(note), note_width))
+                -- the day it was written, local time (blank when unknown, so the columns still line up)
+                local day = (utils.local_time(note.created) or ''):sub(1, 10)
+                day = day ~= '' and day or string.rep(' ', 10)
+                table.insert(content_lines, day .. ' ' .. number .. ' ' .. fit(labeled(note), note_width))
+                dates[#content_lines] = 0
                 previews[#content_lines] = note_tail(note.filename .. ':' .. note.row, path_width, note.line)
                 marks_metadata[#content_lines] = vim.tbl_extend('force', note, { type = note.orphan and 'orphan' or 'note' })
             end
@@ -431,9 +434,9 @@ function M.openMarks(opt)
             break
         end
     end
-    -- Archived notes all in gray
-    for row in pairs(dimmed) do
-        vim.api.nvim_buf_set_extmark(win_bufnr, NS_Preview, row-1, 0, {end_row=row-1, end_col=#content_lines[row], hl_group='Comment', priority=200})
+    -- Each note's date in gray
+    for row, col in pairs(dates) do
+        vim.api.nvim_buf_set_extmark(win_bufnr, NS_Preview, row-1, col, {end_row=row-1, end_col=col+10, hl_group='Comment', priority=200})
     end
     -- Gray the path and line text, kept as real text so `/` search finds them
     for row, start_col in pairs(gray_from) do
@@ -559,33 +562,23 @@ function M.openMarks(opt)
     vim.cmd('redraw')
 end
 
---- Show an orphaned note (its line isn't in the file any more) to read: its text, and the line it was on. Read only;
---- q quits, <Backspace> or `[[` goes back to the menu.
+--- Open an orphaned note (its line isn't in the file any more) in the note editor, with where it was shown above
 function M.read_orphan(item)
-    local origin = MenuOrigin
-    local bufnr = M.create_window()
-    M.use_markdown(bufnr)
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, item.text)
-    vim.bo[bufnr].modifiable = false
-    utils.align_tables(bufnr, NS_Tables)  -- the text is set after the FileType autocmd ran
-    local hint = 'Orphaned note: its line is gone (' .. item.filename .. ':' .. item.row
-                 .. ') | read only | q quit | <Backspace> return to main menu'
-    vim.wo.winbar = '%#Comment#' .. hint:gsub('%%', '%%%%')
-    vim.api.nvim_buf_set_extmark(bufnr, NS_Preview, 0, 0, {virt_lines_above=true, virt_lines={
-        {{'was on: ' .. vim.trim(item.line or ''), 'Comment'}}, {{'', 'Normal'}},
-    }})
-    local footer = M.created_footer(item.created)
-    if footer then vim.api.nvim_buf_set_extmark(bufnr, NS_Preview, #item.text - 1, 0, {virt_lines=footer}) end
-    vim.fn.winrestview({topline=1, topfill=2})
-    local function back()
-        M.close_panel()
-        if origin and vim.api.nvim_win_is_valid(origin.win) then
-            vim.api.nvim_set_current_win(origin.win)
-            M.openMarks({focus=item})
-        end
+    -- An orphaned note (its line isn't in this version of the file) is edited like any note: the text is changed in
+    -- the buffer's orphan records, which are saved as they are. The hint above says where it was.
+    local record = (utils.Orphans[item.bufnr] or {})[item.index]
+    local function on_save(text)
+        if record then record.text = text end
     end
-    vim.keymap.set('n', '<BS>', back, {buffer=bufnr, silent=true, nowait=true})
-    vim.keymap.set('n', '[[', back, {buffer=bufnr, silent=true})
+    local function on_delete()
+        utils.delete_orphan(item.bufnr, item.index)
+    end
+    local _, store_path = utils.buffer_store(item.bufnr)
+    M.switchEditMode(item.bufnr, item.row, item.text, on_save, on_delete, item, item.id and {store_path, item.id})
+    vim.api.nvim_buf_set_extmark(0, NS_Preview, 0, 0, {virt_lines_above=true, virt_lines={
+        {{'line gone from this version of the file, was ' .. item.filename .. ':' .. item.row .. ': '
+          .. vim.trim(item.line or ''), 'Comment'}},
+    }})
 end
 
 --- @param created string|nil # a record's `created` time, UTC
@@ -714,14 +707,12 @@ function M.create_window(content_lines, keep)
     end})
     vim.b.is_marks_window = true
     vim.bo[bufnr].filetype = 'nvim-marks'
-    -- Markdown highlighting (titles, `code`, **bold**, links) with treesitter: ~1.5ms, where `filetype=markdown`
-    -- loads vim's markdown + html + css syntax files on every open (~10ms). Without the parser, titles only.
-    if not pcall(vim.treesitter.start, bufnr, 'markdown') then
-        vim.api.nvim_buf_call(bufnr, function()
-            vim.cmd([[syntax match NvimMarksTitle /^#.*$/]])
-            vim.cmd([[highlight default link NvimMarksTitle Title]])
-        end)
-    end
+    -- Only `# ` titles are colored: each row is one cut-off line of a note, so markdown highlighting would carry an
+    -- unclosed ` or ** into the following rows (the note editor turns on markdown itself, see use_markdown)
+    vim.api.nvim_buf_call(bufnr, function()
+        vim.cmd([[syntax match NvimMarksTitle /^#.*$/]])
+        vim.cmd([[highlight default link NvimMarksTitle Title]])
+    end)
     vim.cmd('mapclear <buffer>')
     if not keep then vim.cmd('autocmd BufLeave,BufWinLeave,BufHidden <buffer> ++once  :bd!') end
     vim.keymap.set('n', 'q', M.close_panel, {buffer=true, silent=true, nowait=true})
