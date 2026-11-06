@@ -339,8 +339,16 @@ function M.save_all(bufnr)
     M.OnDisk[bufnr] = M.OnDisk[bufnr] or {}
     M.LoadedStatuses[bufnr] = M.LoadedStatuses[bufnr] or {}
     M.LoadedFiles[bufnr] = M.LoadedFiles[bufnr] or {}
-    local records, changed = marks_file.merge_file(marks_file.load(store_path), key, current, ids.known, M.LoadedTexts[bufnr],
-                                                   M.OnDisk[bufnr], M.LoadedStatuses[bufnr], M.LoadedFiles[bufnr])
+    -- Locked from the read to the write, so another nvim or an agent can't write in between and be overwritten
+    local records, changed
+    marks_file.with_lock(store_path, function()
+        records, changed = marks_file.merge_file(marks_file.load(store_path), key, current, ids.known, M.LoadedTexts[bufnr],
+                                                 M.OnDisk[bufnr], M.LoadedStatuses[bufnr], M.LoadedFiles[bufnr])
+        if changed then
+            marks_file.save(store_path, records)
+            M.LoadedAt[bufnr] = marks_file.mtime(store_path)  -- our own write, not a change to reload
+        end
+    end)
     for _, record in ipairs(records) do
         if record.file == key then
             M.OnDisk[bufnr][record.id] = true
@@ -352,10 +360,6 @@ function M.save_all(bufnr)
             M.LoadedTexts[bufnr][item.id] = item.text
             M.LoadedStatuses[bufnr][item.id] = item.status or false
         end
-    end
-    if changed then
-        marks_file.save(store_path, records)
-        M.LoadedAt[bufnr] = marks_file.mtime(store_path)  -- our own write, not a change to reload
     end
     -- What's on disk now (theirs merged with ours) is what this buffer should show: reload it when anything
     -- of theirs was kept, so a later save starts from it instead of from old data
@@ -571,6 +575,15 @@ end
 function M.buffer_store(bufnr)
     local path, info, store_path = locate_store(bufnr)
     return marks_file.file_key(path, info), store_path
+end
+
+--- Run `fn` holding the store's lock (see marks_file.with_lock), for a read-merge-write that spans several calls
+---
+--- @param where integer|string # a buffer (its repo's store) or a store path
+function M.with_store_lock(where, fn)
+    local store_path = where
+    if type(where) == 'number' then store_path = select(2, M.buffer_store(where)) end
+    return marks_file.with_lock(store_path, fn)
 end
 
 --- Change (text and/or status) or delete (neither) a note/mark saved for a file that isn't open

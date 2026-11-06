@@ -279,6 +279,67 @@ function M.append_log(store_path, old, new, by)
     return #lines
 end
 
+M.LOCK_DIR = '/tmp/nvim-marks-locks'
+
+--- @return string # the store's lock file, in /tmp so it stays out of the marks folder (often a git repo):
+--- `/tmp/nvim-marks-locks/<repo>-<sha256 of the store's real path, 16 chars>.lock`. The store itself is replaced
+--- by a rename on every write, so a lock on it would be on the old file; this one is never replaced.
+--- edit_note.py (the marks skill) builds the same name: keep the two in step.
+function M.lock_path(store_path)
+    local dir = vim.fs.dirname(store_path)
+    local real = (vim.uv.fs_realpath(dir) or dir) .. '/' .. vim.fs.basename(store_path)
+    return M.LOCK_DIR .. '/' .. vim.fs.basename(dir) .. '-' .. vim.fn.sha256(real):sub(1, 16) .. '.lock'
+end
+
+local ffi_ok, ffi = pcall(require, 'ffi')
+if ffi_ok then
+    ffi_ok = pcall(ffi.cdef, 'int flock(int fd, int operation);')
+    ffi_ok = ffi_ok and pcall(function() return ffi.C.flock end)
+end
+local LOCK_EX, LOCK_NB = 2, 4  -- the same on macOS and Linux
+M.LOCK_TIMEOUT_MS = 3000
+local HeldLocks = {}  --- @type table<string, integer> # {store_path=depth}: this nvim already holds it
+
+--- Run `fn` while holding an exclusive flock(2) on the store's lock file, so a read-merge-write here and one by
+--- another nvim or `edit_note.py` (same lock file) never interleave and overwrite each other's change.
+--- Waits up to LOCK_TIMEOUT_MS for another writer, then runs anyway with a warning rather than lose the save.
+--- Reentrant within this nvim. The lock goes away when the fd closes, also if nvim crashes.
+---
+--- @return any # what `fn` returns
+function M.with_lock(store_path, fn)
+    if HeldLocks[store_path] or not ffi_ok then
+        HeldLocks[store_path] = (HeldLocks[store_path] or 0) + 1
+        local ok, result = pcall(fn)
+        HeldLocks[store_path] = HeldLocks[store_path] - 1
+        if HeldLocks[store_path] == 0 then HeldLocks[store_path] = nil end
+        if not ok then error(result, 0) end
+        return result
+    end
+    vim.fn.mkdir(vim.fs.dirname(store_path), 'p')
+    vim.fn.mkdir(M.LOCK_DIR, 'p')
+    local fd = vim.uv.fs_open(M.lock_path(store_path), 'a', tonumber('644', 8))
+    local locked = false
+    if fd then
+        local waited = 0
+        while true do
+            locked = ffi.C.flock(fd, LOCK_EX + LOCK_NB) == 0
+            if locked or waited >= M.LOCK_TIMEOUT_MS then break end
+            vim.uv.sleep(20)
+            waited = waited + 20
+        end
+    end
+    if not locked then
+        vim.notify('nvim-marks: ' .. M.lock_path(store_path) .. ' is held by another writer, saving without it', vim.log.levels.WARN)
+    end
+    HeldLocks[store_path] = 1
+    local ok, result = pcall(fn)
+    HeldLocks[store_path] = nil
+    if fd then vim.uv.fs_close(fd) end  -- releases the lock
+    if not ok then error(result, 0) end
+    return result
+end
+
+--- Callers that read, merge and then save hold M.with_lock around all three (save_all, edit_record)
 function M.save(store_path, records)
     vim.fn.mkdir(vim.fs.dirname(store_path), 'p')
     -- Log what this write changes compared with what's on disk right now (other writers' changes were logged by them)
@@ -393,6 +454,10 @@ end
 
 --- Change a record's text and/or status, or delete it (text=nil and no status)
 function M.edit_record(store_path, id, text, status)
+    M.with_lock(store_path, function() M.edit_record_unlocked(store_path, id, text, status) end)
+end
+
+function M.edit_record_unlocked(store_path, id, text, status)
     local records = M.load(store_path)
     for i, record in ipairs(records) do
         if record.id == id then

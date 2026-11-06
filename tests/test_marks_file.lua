@@ -186,4 +186,23 @@ function T.test_status_from_prefixes()
     eq(M.status_from_prefixes({kind='note', status='open', text={'(⏺) x'}}).text, {'(⏺) x'}, 'has a status already: untouched')
 end
 
+function T.test_with_lock_waits_for_another_writer()
+    local store_path = vim.fn.tempname() .. '/marks.jsonl'
+    vim.fn.mkdir(vim.fs.dirname(store_path), 'p')
+    vim.fn.mkdir(M.LOCK_DIR, 'p')
+    -- another process (as edit_note.py does) holds the lock for 300ms
+    local holder = vim.system({'python3', '-I', '-c', 'import fcntl, sys, time\n'
+        .. 'f = open(sys.argv[1], "a"); fcntl.flock(f, fcntl.LOCK_EX); print("locked", flush=True); time.sleep(0.3)',
+        M.lock_path(store_path)}, {stdout=function() end})
+    vim.wait(2000, function() return vim.uv.fs_stat(M.lock_path(store_path)) ~= nil end)
+    vim.uv.sleep(100)  -- let it take the lock
+    local started = vim.uv.hrtime()
+    local result = M.with_lock(store_path, function()
+        return M.with_lock(store_path, function() return 'nested' end)  -- reentrant: doesn't wait for itself
+    end)
+    holder:wait()
+    eq(result, 'nested', 'runs fn and returns its result')
+    assert((vim.uv.hrtime() - started) / 1e6 >= 150, 'waited for the other writer')
+end
+
 return T

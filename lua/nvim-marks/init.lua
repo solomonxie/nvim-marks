@@ -203,19 +203,22 @@ function M.edit_note(note)
     M.switchEditMode(note.bufnr, note.row, note.text, function(text)
         -- Not changed in the editor: write nothing, so an edit made meanwhile elsewhere (an agent's reply) stays
         if vim.deep_equal(text, opened_with) then return end
-        -- Changed: apply the user's edit on top of the latest text on disk if only lines were added at the end
-        local latest = utils.latest_note_text(note)
-        if latest and not vim.deep_equal(latest, opened_with) then
-            text = utils.merge_note_edit(opened_with, latest, text)
-        end
-        if note.extmark_id then
-            local record_id = utils.RecordIds[note.bufnr].notes[note.extmark_id]
-            vim.api.nvim_buf_del_extmark(note.bufnr, utils.NS_Notes, note.extmark_id)
-            -- same record and created time, so it keeps its line in the store and its place in the menu
-            utils.set_note(note.bufnr, note.row, text, record_id, note.status, note.created)
-        else
-            utils.edit_stored(note.store_path, note.id, text)
-        end
+        -- Changed: apply the user's edit on top of the latest text on disk if only lines were added at the end.
+        -- Locked from this read to the write (for an open file save_note holds the same lock through save_all).
+        utils.with_store_lock(note.extmark_id and note.bufnr or note.store_path, function()
+            local latest = utils.latest_note_text(note)
+            if latest and not vim.deep_equal(latest, opened_with) then
+                text = utils.merge_note_edit(opened_with, latest, text)
+            end
+            if note.extmark_id then
+                local record_id = utils.RecordIds[note.bufnr].notes[note.extmark_id]
+                vim.api.nvim_buf_del_extmark(note.bufnr, utils.NS_Notes, note.extmark_id)
+                -- same record and created time, so it keeps its line in the store and its place in the menu
+                utils.set_note(note.bufnr, note.row, text, record_id, note.status, note.created)
+            else
+                utils.edit_stored(note.store_path, note.id, text)
+            end
+        end)
     end, function()
         if note.extmark_id then
             vim.api.nvim_buf_del_extmark(note.bufnr, utils.NS_Notes, note.extmark_id)
@@ -815,15 +818,19 @@ end
 --- @param on_save function # called with the typed lines
 function M.save_note(edit_bufnr, target_bufnr, on_save, _, on_delete)
     local text = vim.api.nvim_buf_get_lines(edit_bufnr, 0, -1, false)
-    if not utils.is_empty_note(text) then
-        on_save(text)
-    elseif on_delete then
-        on_delete()  -- an existing note cleared to nothing (or only spaces) is deleted
-    end  -- a new note with nothing typed: just close
-    if target_bufnr then
-        utils.save_all(target_bufnr)  -- to the store right away, so other nvims and scripts see it
-        utils.refresh_sign_bar(target_bufnr)
+    local function save()
+        if not utils.is_empty_note(text) then
+            on_save(text)
+        elseif on_delete then
+            on_delete()  -- an existing note cleared to nothing (or only spaces) is deleted
+        end  -- a new note with nothing typed: just close
+        if target_bufnr then
+            utils.save_all(target_bufnr)  -- to the store right away, so other nvims and scripts see it
+        end
     end
+    -- One lock from on_save's read of the latest text to save_all's write: an agent's reply can't land in between
+    if target_bufnr then utils.with_store_lock(target_bufnr, save) else save() end
+    if target_bufnr then utils.refresh_sign_bar(target_bufnr) end
     vim.bo[edit_bufnr].modified = false
     local function close()
         if vim.api.nvim_buf_is_valid(edit_bufnr) then vim.api.nvim_buf_delete(edit_bufnr, {force=true}) end
